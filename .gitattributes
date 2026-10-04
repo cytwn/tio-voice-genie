@@ -1,0 +1,4 @@
+# Store every file byte-for-byte: no line-ending conversion.
+# The .bat files need CRLF, some .py files are LF, rescue.ps1 needs its BOM;
+# converting any of them can break the program on the user's PC.
+* -text

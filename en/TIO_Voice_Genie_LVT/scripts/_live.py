@@ -171,6 +171,8 @@ def dot_joins_next(before, after):
 
 
 _SPEND_CAP = re.compile(r"spend(ing)?.?cap", re.I)
+# V1.38（下一版待辦 20）：diagnose() 的「網路斷了」標題，也是 net_down() 的判準（同一個常數：改字只改這裡，英文版也只翻這一處）
+NET_DOWN_TITLE = "Can't reach the internet"
 
 
 def diagnose(exc):
@@ -197,7 +199,7 @@ def diagnose(exc):
         return (True, "There's a problem with the API key",
                 "The key may be mistyped or disabled, or this model hasn't been enabled for this project.\n      → Go back to the menu and choose \"9 API key settings\" to check it or switch to another key (during live captions, press Ctrl+C to stop first)\n      → Or check at aistudio.google.com/apikey that the key is still valid")
     if re.search(r"getaddrinfo|name.?resolution|no address|dns", low):
-        return (True, "Can't reach the internet",
+        return (True, NET_DOWN_TITLE,
                 "The server's address could not be looked up; usually the internet connection is down or there's a DNS problem.\n      → Check your network connection")
     if re.search(r"ssl|certificate", low):
         return (True, "Certificate intercepted",
@@ -221,6 +223,21 @@ def diagnose(exc):
     #    （安靜斷線／斷線前有一段沒字幕／一般斷線），不靠例外字串 —— 同一種斷線的類別與字串會隨模型與 SDK 變
     #    （09-23 網路卡死是 ConnectionClosedError、09-25 安靜斷線是 APIError 1008）。這裡維持只判「要不要人介入」。
     return (False, "", "")
+
+
+def net_down(exc):
+    """
+    V1.38（下一版待辦 20）：這個錯誤是不是「網路斷了」（查不到伺服器位址）？
+    diagnose() 照舊把它算「要人介入」——即時字幕（功能 1／3／6）斷線本來就會一直自動重連，畫面說明不變。
+    功能 2（轉逐字稿）、功能 4（翻譯）改用這個判斷：網路斷了就等網路回來再試，不要整份停下。
+    🔴 2026-10-04 實測：筆電 Wi-Fi 斷約 40 秒，功能 2 第 2 趟遇到 getaddrinfo failed，被當成跟額度用完、金鑰失效
+       同一類「重試也不會好」→ 整份停下、沒有產出；其實 40 秒後網路就回來了。
+    「查不到位址」那一類，判準跟 diagnose() 完全同一條（比對同一個標題常數），不另寫一份：兩份會漂。
+    V1.38 審查（#8）：另認 Windows 的「網路無法連線」三種——10050 網路斷了、10051 網路無法連線、10065 主機無法連線
+    （網址還在快取裡、卻沒有路可走時是這三種，不是查不到位址）。說明文字跟著系統語言（中文 Windows 是中文），所以比對編號。
+    這三種 diagnose() 照舊不算「要人介入」（即時字幕的說明不變）；功能 2／4 等滿還沒回來時另外用 net_down 判斷要不要停。
+    """
+    return diagnose(exc)[1] == NET_DOWN_TITLE or bool(re.search(r"(WinError|Errno) 100(50|51|65)\b", str(exc)))
 
 
 ROTATE_PAUSE_WAIT = 30.0   # 到了換線時間之後，最多再等幾秒找講者停頓（8 分＋30 秒仍遠低於伺服器上限）

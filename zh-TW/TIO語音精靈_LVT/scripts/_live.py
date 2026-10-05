@@ -171,6 +171,8 @@ def dot_joins_next(before, after):
 
 
 _SPEND_CAP = re.compile(r"spend(ing)?.?cap", re.I)
+# V1.38（下一版待辦 20）：diagnose() 的「網路斷了」標題，也是 net_down() 的判準（同一個常數：改字只改這裡，英文版也只翻這一處）
+NET_DOWN_TITLE = "連不到網路"
 
 
 def diagnose(exc):
@@ -208,7 +210,7 @@ def diagnose(exc):
                 "      → 回到選單選「9 API 金鑰設定」檢查或換一組（即時字幕請先按 Ctrl+C 結束）\n"
                 "      → 或到 aistudio.google.com/apikey 確認金鑰仍然有效")
     if re.search(r"getaddrinfo|name.?resolution|no address|dns", low):
-        return (True, "連不到網路",
+        return (True, NET_DOWN_TITLE,
                 "查不到伺服器位址，通常是網路斷了或 DNS 有問題。\n"
                 "      → 檢查網路連線")
     if re.search(r"ssl|certificate", low):
@@ -234,6 +236,21 @@ def diagnose(exc):
     #    （安靜斷線／斷線前有一段沒字幕／一般斷線），不靠例外字串 —— 同一種斷線的類別與字串會隨模型與 SDK 變
     #    （09-23 網路卡死是 ConnectionClosedError、09-25 安靜斷線是 APIError 1008）。這裡維持只判「要不要人介入」。
     return (False, "", "")
+
+
+def net_down(exc):
+    """
+    V1.38（下一版待辦 20）：這個錯誤是不是「網路斷了」（查不到伺服器位址）？
+    diagnose() 照舊把它算「要人介入」——即時字幕（功能 1／3／6）斷線本來就會一直自動重連，畫面說明不變。
+    功能 2（轉逐字稿）、功能 4（翻譯）改用這個判斷：網路斷了就等網路回來再試，不要整份停下。
+    🔴 2026-10-04 實測：筆電 Wi-Fi 斷約 40 秒，功能 2 第 2 趟遇到 getaddrinfo failed，被當成跟額度用完、金鑰失效
+       同一類「重試也不會好」→ 整份停下、沒有產出；其實 40 秒後網路就回來了。
+    「查不到位址」那一類，判準跟 diagnose() 完全同一條（比對同一個標題常數），不另寫一份：兩份會漂。
+    V1.38 審查（#8）：另認 Windows 的「網路無法連線」三種——10050 網路斷了、10051 網路無法連線、10065 主機無法連線
+    （網址還在快取裡、卻沒有路可走時是這三種，不是查不到位址）。說明文字跟著系統語言（中文 Windows 是中文），所以比對編號。
+    這三種 diagnose() 照舊不算「要人介入」（即時字幕的說明不變）；功能 2／4 等滿還沒回來時另外用 net_down 判斷要不要停。
+    """
+    return diagnose(exc)[1] == NET_DOWN_TITLE or bool(re.search(r"(WinError|Errno) 100(50|51|65)\b", str(exc)))
 
 
 ROTATE_PAUSE_WAIT = 30.0   # 到了換線時間之後，最多再等幾秒找講者停頓（8 分＋30 秒仍遠低於伺服器上限）

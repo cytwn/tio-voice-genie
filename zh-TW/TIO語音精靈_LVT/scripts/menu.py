@@ -256,8 +256,17 @@ def report_live(rc, stem, cancelled=None):
     has_md, has_txt = os.path.exists(md), os.path.exists(txt)
     base = os.path.basename(stem)
     if has_md:
-        print(C(f"\n✅ 檔案在桌面：{base}.md（給人讀）"
-                + (f"／{base}.txt（備份）" if has_txt else ""), GRN))
+        # V1.38（X7h）審查第 4 輪：功能 3「準」有幾句沒有譯文（結束時還沒翻好／翻譯失敗）時 .md 檔頭照實講（都含「原文有存」）——這裡不打綠色 ✅。
+        #    標記是 live_bilingual_hq.Out.save 寫進檔頭的字樣；英文版兩邊各翻一次，tools\test_coupling.py 核對兩邊一樣。
+        try:
+            head = io.open(md, encoding="utf-8", errors="replace").read(3000).split("\n---\n", 1)[0]
+        except OSError:
+            head = ""
+        nomt = "原文有存" in head
+        print(C(f"\n{'⚠' if nomt else '✅'} 檔案在桌面：{base}.md（給人讀）"
+                + (f"／{base}.txt（備份）" if has_txt else ""), YEL if nomt else GRN))
+        if nomt:
+            print(C("   有幾句沒有譯文（原文都有存），原因寫在 .md 的檔頭。", DIM))
         if rc not in (0, None):
             print(C("   （程式是非正常結束的，內容可能不完整，請開檔確認）", YEL))
     elif has_txt:
@@ -619,7 +628,10 @@ def do_translate():
     #    （2026-09-10 稽核抓到：這是「單批失敗不中止」帶來的副作用。）
     made = os.path.basename(out)
     if rc not in (0, None) or not os.path.exists(out + "_對照.md"):
-        print(C("\n✗ 翻譯沒有完成。", RED))
+        # V1.38 審查第 3 輪：一段都還沒翻好就按 Ctrl+C（使用說明寫的正常用法）——不是錯誤，不叫人找紅字、跑診斷
+        cancelled = _run_interrupted and not os.path.exists(out + "_對照.md")
+        print(C("\n✗ 已取消（你按了 Ctrl+C），沒有產生翻譯檔。", YEL) if cancelled
+              else C("\n✗ 翻譯沒有完成。", RED))
         # 🔴 音檔已經先轉了一次逐字稿、錢也花了。不講的話同事會整個重跑，
         #    等於同一份錄音付兩次轉錄費。
         if is_audio and os.path.exists(interim):
@@ -627,14 +639,24 @@ def do_translate():
                     f"{os.path.basename(interim)}", GRN))
             print(C("   要重試翻譯的話，回選單按 4、這次直接選那個 .json，"
                     "就不用再付一次轉錄的錢。", DIM))
-        print(C("   請往上捲看紅色的錯誤訊息；看不懂就點兩下 6_診斷.bat 截圖回報。", DIM))
+        if not cancelled:
+            print(C("   請往上捲看紅色的錯誤訊息；看不懂就點兩下 6_診斷.bat 截圖回報。", DIM))
         pause(); return
     # 🔴 2026-09-20 複查（major）：逐字稿本身缺了一段時，翻完的四個檔照樣打綠勾 ——
     #    而 _<語言>.md 正是要寄給外賓的那份。比照功能 2／5：讀 _對照.md 的檔頭決定 ✅ 還是 ⚠。
     #    標記字串跟 transcribe_meeting.py／json_to_md.warn_lines 寫檔頭的地方必須一致。
     head4 = io.open(out + "_對照.md", encoding="utf-8",
                     errors="replace").read(3000).split("\n---\n", 1)[0]
-    if ("**這份逐字稿可能不完整**" in head4 or "段辨識失敗，這份逐字稿並不完整" in head4):
+    gap_tr = "段沒有翻譯成功" in head4
+    gap_src = ("**這份逐字稿可能不完整**" in head4 or "段辨識失敗，這份逐字稿並不完整" in head4)
+    if gap_tr and gap_src:
+        # V1.38 審查第 2 輪：兩件事都要講（只講沒翻到，會把「原來的逐字稿就不完整」蓋掉）
+        print(C(f"\n⚠ 桌面上這幾個檔（都以 {made} 開頭；有些段落沒翻到，內文標成「（這段沒翻到）」；原來的逐字稿也不完整。兩件事檔頭都有寫）：", YEL))
+    elif gap_tr:
+        # V1.38：只翻成一部分（網路一直沒回來、額度用完、按了 Ctrl+C）時不可以打 ✅（以前照樣打 ✅）。
+        #    標記是 translate_transcript.write_outputs 寫進檔頭的字樣；英文版兩邊各翻一次，tools\test_coupling.py 核對兩邊一樣。
+        print(C(f"\n⚠ 桌面上這幾個檔（都以 {made} 開頭；有些段落沒翻到，內文標成「（這段沒翻到）」，檔頭寫了缺幾段）：", YEL))
+    elif gap_src:
         # 🔴 V1.26（C1）：翻譯程式自己已經印過「原來的逐字稿就不完整」、缺口清單和「寄出去之前先看缺口」，
         #    這裡原本整句再講一次（同一句印兩遍），還印出 Markdown 的 ** 星號（主控台不會變粗體，只會原樣印出）。
         #    改成一句狀態＋檔案清單。上面判斷用的 "**這份逐字稿可能不完整**" 是**檔案內容**的字樣，不能動。

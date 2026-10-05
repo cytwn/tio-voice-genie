@@ -117,6 +117,9 @@ _HOST = socket.gethostname()
 _TEMP_FILES = []                      # 這次跑產生的暫存檔（視窗被關掉時要立刻刪）
 _CLOUD_FILES = []                     # 這次上傳到雲端的檔名（同上）
 RETRY_WAITS = (15, 30, 60)            # 伺服器忙（503）時的重試間隔（秒）
+NET_WAIT_STEP = 20                     # V1.38（待辦 20）：網路斷了（查不到伺服器位址）時，每幾秒再試一次
+NET_WAIT_MAX = 300                     # 同一次斷網最多等幾秒；等滿還沒回來才停（之後的段落不再各等一次）
+_net_waited = 0                        # 這一次斷網已經等了幾秒：任何一次呼叫成功、或伺服器有回應就歸零（整份共用，見 _with_retry）
 ATC = types.AudioTranscriptionConfig
 MODE = types.AudioTranscriptionConfigMode
 
@@ -345,7 +348,8 @@ def load_audio(client, wav):
     atexit.register(_drop_remote, client, f.name)
     while f.state.name == "PROCESSING":
         time.sleep(2)
-        f = client.files.get(name=f.name)
+        # V1.38 審查（#6）：查處理狀態也是一次連網，網路斷了一樣要等網路回來（原本裸呼叫：斷一下就整份停）
+        f = _with_retry("上傳錄音", lambda: client.files.get(name=f.name))
     return f
 
 
@@ -948,18 +952,50 @@ def _with_retry(what, fn):
        寫死的重試（_api_client._upload_fd：回應沒帶 x-goog-upload-status 標頭就等 1、2、4 秒重送，最多 3 次）。
        這裡補一層：等久一點再試，
        並用中文告訴使用者現在在等什麼。額度用完、參數錯誤這種重試也不會好的，不重試。
+    🔴 V1.38（下一版待辦 20）：網路斷了（查不到伺服器位址，_live.net_down）另外處理：每 NET_WAIT_STEP 秒再試，
+       同一次斷網最多等 NET_WAIT_MAX 秒，畫面講清楚在等網路、網路回來時也講一聲。「已經等了多久」整份共用
+       （_net_waited）：任何一次呼叫成功就歸零；一直沒回來，等滿之後的呼叫不再各等一次（段落迴圈接著就停）。
+       V1.38 審查（#5）：伺服器有回應（APIError：503、429…）也歸零——那證明網路回來了；不歸零的話，斷 280 秒、回一次 503、
+       再斷一下，就會被說成「網路一直沒有回來（等了 5 分鐘）」而停掉整份。ReadError 這類不算（證明不了網路回來了）。
+       等網路的訊息不預告「等不到會怎樣」（#2、#9）：段落迴圈會停、對齊會改用估算，各自在那裡講。
+       2026-10-04 實測：Wi-Fi 斷約 40 秒，第 2 趟先 ReadError（照常重試），重試時變成 getaddrinfo failed，
+       以前被當成「重試也不會好」→ 整份停下、沒有產出；其實 40 秒後網路就回來了。
     """
+    global _net_waited
     waits = tuple(RETRY_WAITS)
-    for k in range(len(waits) + 1):
+    k = 0
+    while True:
         try:
-            return fn()
+            r = fn()
         except Exception as e:
+            if _net_waited and isinstance(e, gerr.APIError) and not _net_down(e):
+                # 審查第 2 輪：①本身就被判成網路斷了的錯誤頁（例如代理回的 502 內文有 DNS 字樣）不算回來，不然每輪都歸零、永遠等不完
+                #    ②不說「繼續」：同一個錯誤可能接著就讓工作停下（例如額度用完）
+                print(f"  ✓ 網路回來了（等了 {_net_waited} 秒）")
+                _net_waited = 0
+            if _net_down(e):
+                if _net_waited >= NET_WAIT_MAX:
+                    raise
+                if _net_waited == 0:
+                    print(f"  ⚠ {what}：網路斷了，先等網路回來：每 {NET_WAIT_STEP} 秒再試一次，"
+                          f"最多等 {NET_WAIT_MAX // 60} 分鐘")
+                else:
+                    print(f"  … 網路還沒回來，{NET_WAIT_STEP} 秒後再試（已經等了 {_net_waited} 秒）")
+                time.sleep(NET_WAIT_STEP)
+                _net_waited += NET_WAIT_STEP
+                continue
             if k == len(waits) or not _transient(e):
                 raise
             why = "伺服器目前很忙" if isinstance(e, gerr.ServerError) else "網路連線不穩"
             print(f"  ⚠ {what}：{why}（{type(e).__name__}），{waits[k]} 秒後再試"
                   f"（第 {k + 1} 次，最多 {len(waits)} 次）")
             time.sleep(waits[k])
+            k += 1
+            continue
+        if _net_waited:
+            print(f"  ✓ 網路回來了（等了 {_net_waited} 秒），繼續")
+            _net_waited = 0
+        return r
 
 
 def _sweep_leftovers(client, cloud_age=None, temp_age=None):
@@ -1235,6 +1271,7 @@ _LOST_WHY = {
     "mismatch": "單獨補轉的結果跟正文對不起來，沒有替換",
     "failed": "單獨補轉那一次失敗了",
     "busy": "補轉時伺服器很忙（或額度、金鑰有問題），這一處沒有補轉",
+    "net": "補轉時網路斷了，這一處沒有補轉",                       # V1.38 審查（#7）
     "skipped": "這一段要補轉的地方超過 {n} 處，這一處沒有補轉",
 }
 
@@ -1326,9 +1363,11 @@ def _recover_lost(client, cwav, skel, aligned, vocab, clen, estimated=False, tag
             tok += getattr(u, "prompt_token_count", 0) or 0
         except Exception as e:                 # noqa: BLE001 —— 補不回來就照實講，不能讓整段作廢
             if _transient(e) or _permanent(e):
-                halt = "busy"
-                print(f"  ⚠ 補轉時{'伺服器很忙或網路不穩' if _transient(e) else '遇到重試也不會好的錯誤'}"
-                      f"（{type(e).__name__}），剩下的不補了，會列在檔頭")
+                # V1.38：網路斷了另外講（補轉照舊不重試、不等網路：見 pass2_clean 的 retry=False）；檔頭的原因也要對（審查 #7）
+                halt = "net" if _net_down(e) else "busy"
+                why = ("網路斷了" if _net_down(e) else
+                       "伺服器很忙或網路不穩" if _transient(e) else "遇到重試也不會好的錯誤")
+                print(f"  ⚠ 補轉時{why}（{type(e).__name__}），剩下的不補了，會列在檔頭")
             else:
                 print(f"  ⚠ {hhmmss(st)} 那一段補轉失敗（{type(e).__name__}），會列在檔頭")
             missing.append((st, en, s.get("speaker"), kind, halt or "failed"))
@@ -1520,11 +1559,20 @@ def main():
             failed.append((i, cs, ce, err))
             last_err = e
             print(f"  ✗ {tag}這一段失敗：{err}")
-            if _permanent(e):
+            if _permanent(e) or _net_down(e):
                 # 🔴 額度用完／金鑰失效這種，剩下的段落一定也會失敗。
                 #    三小時的錄音有幾十段，一段一段撞完只是浪費時間，
                 #    而且畫面上看起來像在工作。已完成的段落已經落地了。
-                print("    （這個錯誤重試也不會好，停下來；已完成的段落已存檔）")
+                # V1.38：網路斷了的已經在 _with_retry 等過（同一次斷網最多 NET_WAIT_MAX 秒）還沒回來，才會走到這裡
+                #    （_net_down 另外列：網址查到了、卻沒有路可走的那幾種斷法不算 _permanent）。
+                # V1.38 審查：「已完成的段落已存檔」只在真的有完成的段落時才講（#2：28 分鐘以內只有一段，停下來就什麼都沒有）；
+                #    後面沒跑的段落也列進失敗清單（#1）：檔頭才會列出缺哪些時段，不會被說成「有聲音卻沒有字、可能是音樂或掌聲」。
+                kept = "；已完成的段落已存檔" if segs else ""
+                if _net_down(e):
+                    print(f"    （網路一直沒有回來（等了 {NET_WAIT_MAX // 60} 分鐘），先停下來{kept}）")
+                else:
+                    print(f"    （這個錯誤重試也不會好，停下來{kept}）")
+                failed += [(j, s0, s1, "沒有轉，因為在前面那段就停下來了") for j, (s0, s1) in enumerate(chunks[i:], i + 1)]
                 break
             print(f"    （其餘段落繼續跑，已完成的不會丟掉）")
         finally:
@@ -1549,7 +1597,16 @@ def main():
         _quiet_remove(part_json)
         sys.exit(0)
     if not segs:
-        n_ok = len(chunks) - len(failed) if not _permanent(last_err) else 0
+        # V1.38 審查第 3 輪：這一次寫的中途存檔是空的（[]）——不清的話 _explain 會叫人用功能 5 去救一個空檔。
+        #    第 4 輪：只清「內容是空的」：這一次第 1 段就失敗時根本沒寫過，桌面上那份是上一次中斷留下、付過錢的，不能刪
+        try:
+            with io.open(part_json, encoding="utf-8") as fp:
+                empty = json.load(fp) == []
+        except Exception:
+            empty = False
+        if empty:
+            _quiet_remove(part_json)
+        n_ok = len(chunks) - len(failed)       # V1.38 審查第 2 輪：停下之後沒跑的段落已經列進 failed，不用再強制當成全部失敗
         print("\n✗ 每一段都失敗了，沒有產出。" if not n_ok else
               f"\n✗ 有 {len(failed)} 段失敗，其他跑完的段落沒有辨識到有人講話，沒有產出。")
         # 🔴 這裡一定要給中文診斷。per-chunk 的 except 把例外吞掉了，
@@ -1741,8 +1798,19 @@ def _diag(exc):
 
 
 def _permanent(exc):
-    """這個錯誤重試有沒有意義？額度用完、金鑰失效、DNS 掛掉都沒有。"""
+    """這個錯誤重試有沒有意義？額度用完、金鑰失效、DNS 掛掉都沒有。
+    V1.38：DNS 掛掉（＝網路斷了）仍算在這裡，但 _with_retry 會先等網路回來（最多 NET_WAIT_MAX 秒），等滿還沒回來才走到這裡。"""
     return _diag(exc)[0]
+
+
+def _net_down(exc):
+    """V1.38（待辦 20）：網路斷了（查不到伺服器位址）——等網路回來就會好。判準住在 _live.net_down（跟「連不到網路」同一條）。"""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _live import net_down
+        return net_down(exc)
+    except Exception:
+        return False
 
 
 def _reason(exc):

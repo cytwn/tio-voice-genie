@@ -104,6 +104,15 @@ logging.getLogger("google_genai").setLevel(logging.ERROR)
 
 ASR_MODEL = "gemini-3.5-transcribe-live"
 MT_MODEL = "gemini-3.5-flash-lite"   # 實測 0.73s／句；flash 要 2~5s 且會 503
+# V1.38（10-05 X7h）：翻一句最多等幾秒。平常一句 0.5～1.3 秒；Google 偶爾一次呼叫卡住 50 秒以上（X7h 實測 51 秒），
+#    後面每一句都排在它後面一起卡住、字幕整個停住。等不到就放棄這一次、重試（translate_line 最多三次）。
+MT_TIMEOUT = 12
+LATE_MT = "（結束時還沒翻好）"      # V1.38（X7h）：收尾時翻譯還沒回來的句子，譯文欄寫這個（原文照樣存）
+try:      # 連線層的單次逾時：卡住的那一次直接放棄、不留著佔背景執行緒（收尾時最多再等它 MT_TIMEOUT 秒）。套件不支援就只靠 translate_line 的總時限
+    _MT_HTTP = {"http_options": types.HttpOptions(timeout=MT_TIMEOUT * 1000)}
+    types.GenerateContentConfig(**_MT_HTTP)
+except Exception:
+    _MT_HTTP = {}
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _live import (Reconnect, DropWatch, SentenceGate, SilenceGate,     # noqa: E402
                    on_console_close, open_live, quiet_async_noise, mix_lanes, MIX_GRACE, SENT_CLOSE,
@@ -401,17 +410,20 @@ def _mt_request(client, prompt):
         model=MT_MODEL, contents=prompt,
         config=types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(
-                thinking_level=types.ThinkingLevel.MINIMAL)))
+                thinking_level=types.ThinkingLevel.MINIMAL),
+            **_MT_HTTP))
 
 
-async def translate_line(client, target, s, ctx, frag, pause=asyncio.sleep):
-    """翻一句，回傳要顯示的譯文（三次都失敗時是「（翻譯失敗 …）」）。pause 只給測試換掉用。"""
+async def translate_line(client, target, s, ctx, frag, pause=asyncio.sleep, stats=None):
+    """翻一句，回傳要顯示的譯文（三次都失敗時是「（翻譯失敗 …）」）。pause 只給測試換掉用。
+    stats（dict）給了的話，三次都失敗時 stats["failed"] 加 1（V1.38 審查第 4 輪：收尾照實講有幾句沒有譯文、不打 ✅）。"""
     prompt = build_mt_prompt(target, s, ctx, frag)
     # 這些模型偶發 ServerError／連線問題，重試就好（實測過）
     g, err = "", None
     for attempt in range(3):
         try:
-            r = await asyncio.to_thread(_mt_request, client, prompt)
+            # V1.38（X7h）：總時限是保險（連線層的單次逾時沒生效時，也不會一句卡住、後面全部跟著停）
+            r = await asyncio.wait_for(asyncio.to_thread(_mt_request, client, prompt), MT_TIMEOUT + 3)
             g = (r.text or "").strip()
             if g:
                 break
@@ -419,6 +431,8 @@ async def translate_line(client, target, s, ctx, frag, pause=asyncio.sleep):
             err = f"{type(e).__name__}: {str(e)[:60]}"
             await pause(0.4 * (attempt + 1))
     if not g:
+        if stats is not None:
+            stats["failed"] = stats.get("failed", 0) + 1
         return f"（翻譯失敗 {err}）"      # 🔴 程式自己組的中文，不可以拿去做語言檢查
     try:
         bad = mt_wrong_lang(target, g) or echoes_source(target, g, s)
@@ -430,8 +444,8 @@ async def translate_line(client, target, s, ctx, frag, pause=asyncio.sleep):
     # 只補問一次、不做三次重試：最壞情況只多一次呼叫的延遲。
     g2, ok2 = "", False
     try:
-        r = await asyncio.to_thread(
-            _mt_request, client, build_mt_prompt(target, s, ctx, frag, retry=True))
+        r = await asyncio.wait_for(asyncio.to_thread(
+            _mt_request, client, build_mt_prompt(target, s, ctx, frag, retry=True)), MT_TIMEOUT + 3)
         g2 = (r.text or "").strip()
         ok2 = bool(g2) and not mt_wrong_lang(target, g2) and not echoes_source(target, g2, s)
     except Exception:
@@ -439,6 +453,16 @@ async def translate_line(client, target, s, ctx, frag, pause=asyncio.sleep):
     # 補問的答案也不對（或失敗）就用第一次的：語言錯、照抄原文的情形不會比改版前差。
     # （判準誤抓的純漢字日文例外：補問若回了帶假名的另一種譯法，會換成那一個——一樣是日文）
     return g2 if ok2 else g
+
+
+def late_rows(pending, q):
+    """V1.38（X7h）：收尾時還沒翻好的句子＝正在翻的那一句（pending）＋佇列裡還沒輪到的，照原本的先後。只拿出來、不翻。"""
+    rows = list(pending)
+    while True:
+        try:
+            rows.append(q.get_nowait())
+        except asyncio.QueueEmpty:
+            return rows
 
 
 # ───────────────────────── 音訊來源 ─────────────────────────
@@ -646,6 +670,9 @@ class Out:
         self.turns = []          # V1.35：每一句原文是第幾回合講的（跟 rows 一一對應；見 _live.SentenceGate.cur_turn）
         self.finals = []         # V1.35（待辦 9）：這一場收到的 Google 定稿 (收到的秒, 文字)（只拿來在存檔前更正原文的數字）
         self.num_pairs = []      # 存檔時更正的數字 [(舊, 新)]（收尾畫面照實講）
+        self.late = 0            # V1.38（X7h）：收尾時翻譯還沒回來、譯文標成 LATE_MT 的句數（.md 檔頭照實講）
+        self.failed = 0          # V1.38 審查第 4 輪：翻譯三次都失敗（「（翻譯失敗 …）」）的句數（.md 檔頭照實講）
+        self.nomt = set()        # 沒有譯文的列（結束時還沒翻好／翻譯失敗）：存檔時不在那幾列加「這句譯文是更正前翻的」
         self.live = open(stem + ".txt", "w", encoding="utf-8", buffering=1)
         self.live.write(f"# 雙語字幕（準確模式）{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                         + (f"# {source}\n" if source else "") + "\n")
@@ -667,7 +694,7 @@ class Out:
         self.turns.append(turn)
         self.live.write(f"[{self.ts(t)}] {src}\n[{self.ts(t)}] {tgt}\n\n")
         print(f"{SRC_C}[{self.ts(t)}] {src}{RESET}")
-        print(f"{TGT_C}          {tgt}{RESET}  {DIM}(+{lag:.1f}s){RESET}\n")
+        print(f"{TGT_C}          {tgt}{RESET}" + (f"  {DIM}(+{lag:.1f}s){RESET}" if lag is not None else "") + "\n")   # 沒有譯文的列不印延遲
 
     def save(self, want_srt=False):
         try:
@@ -686,6 +713,10 @@ class Out:
         if self.source:
             md.append(f"- {self.source}")
         md.append(f"- 共 {len(self.rows)} 句")
+        if self.late:
+            md.append(f"- ⚠ 有 {self.late} 句結束時翻譯還沒回來（翻譯一直沒有回應），原文有存，譯文標成「{LATE_MT}」")
+        if self.failed:
+            md.append(f"- ⚠ 有 {self.failed} 句翻譯失敗（重試三次都沒拿到），原文有存，譯文標成「（翻譯失敗 …）」")
         for _k, (_new, pairs) in sorted(fixes.items()):
             self.num_pairs += pairs
         if fixes:
@@ -702,7 +733,8 @@ class Out:
             if i - 1 in fixes:
                 s, pairs = fixes[i - 1]
                 note = "、".join(f"{a} → {b}" for a, b in pairs)
-                gm = f"{g}\n\n〔原文數字已依 Google 定稿更正（{note}）；這句譯文是更正前翻的，數字以原文為準〕"
+                if i - 1 not in self.nomt:      # 沒有譯文的列不加「這句譯文是更正前翻的」（審查第 4 輪）
+                    gm = f"{g}\n\n〔原文數字已依 Google 定稿更正（{note}）；這句譯文是更正前翻的，數字以原文為準〕"
             md += [f"**[{self.ts(t)}]**", "", f"> {s}", "", gm, ""]
             end = self.rows[i][0] if i < len(self.rows) else t + 5
             srt += [str(i), f"{self.srt_ts(t)} --> {self.srt_ts(end)}", srt_s, g, ""]
@@ -734,6 +766,7 @@ async def run(a):
     #    🔴 不可以在訊號處理函式裡直接 print：剛好撞上字幕正在輸出時會 reentrant call 出錯，
     #    交給事件迴圈代印；迴圈已經結束時（收尾最後階段）就安靜略過。
     loop, presses, started = asyncio.get_running_loop(), [0], [False]
+    waiting, saved = [0], [False]   # V1.38 審查第 4 輪：收尾時還有幾句在等翻譯／檔案存好了沒（第二次按 Ctrl+C 的提示照實講）
 
     def _notice(n):
         if not started[0]:
@@ -743,6 +776,12 @@ async def run(a):
             #    實測（3 次，且都是「講話中途中斷、翻譯佇列還有積壓」的最不利情境）：
             #    Ctrl+C 到完全收尾 **3.0 秒**，與功能 1 相同。改成與另外兩支一致的 3～5 秒。
             print(f"\n{DIM}  收到 Ctrl+C，正在收尾（等最後幾句翻完、存檔），約 3～5 秒…{RESET}")
+        elif saved[0]:
+            print(f"{DIM}  檔案都存好了，正在關閉，請再等幾秒。{RESET}")
+        elif waiting[0]:
+            # V1.38 審查第 4 輪：還有句子在等翻譯時，按 X 這幾句連原文都不會存（.txt 是翻好才寫）——不要叫人按 X
+            print(f"{DIM}  還在等最後 {waiting[0]} 句翻譯，等不到的也會存原文；"
+                  f"現在按視窗右上角的 X 的話，這幾句連原文都不會存。{RESET}")
         else:
             # 🔴 要講代價：按 X 會跳過整理 .md（收尾就在做這件事），而且選單在同一個視窗、會一起關掉
             print(f"{DIM}  還在收尾，請再等幾秒。現在按視窗右上角的 X 也能結束，"
@@ -793,6 +832,8 @@ async def run(a):
         start_level_watch(src)       # P1：開場印一次收音狀態，之後一陣子沒字幕才再印
 
     mt_q = asyncio.Queue()
+    pending = []     # V1.38（X7h）：正在翻的那一句（收尾時翻譯還沒回來的話，原文照樣存；見 late_rows）
+    mt_stats = {"failed": 0}    # V1.38 審查第 4 輪：翻譯三次都失敗的句數（收尾照實講、不打 ✅）
     loop = asyncio.get_running_loop()
     # V1.35：最後一欄＝這一句是第幾回合講的（見 _live.SentenceGate.cur_turn；存檔前更正數字只認那一回合的定稿）
     gate = SentenceGate(lambda s, frag=False: loop.call_soon_threadsafe(
@@ -812,9 +853,14 @@ async def run(a):
         ctx = []
         while True:
             t, s, born, frag, turn = await mt_q.get()
-            g = await translate_line(client, a.target, s, ctx, frag)
+            pending[:] = [(t, s, born, frag, turn)]
+            f0 = mt_stats["failed"]
+            g = await translate_line(client, a.target, s, ctx, frag, stats=mt_stats)
+            pending.clear()
             ctx.append(s)
             out.add(t, s, g, time.time() - born, turn)
+            if mt_stats["failed"] != f0:
+                out.nomt.add(len(out.rows) - 1)
             mt_q.task_done()
 
     async def ticker():
@@ -985,14 +1031,32 @@ async def run(a):
     #    Python 3.12 起 wait_for 直接執行 join()，佇列是空的就立刻回來 → 翻譯工作被取消、最後一句沒存到
     #    （檔案來源：檔尾最後一句是「謝謝」這種短殘字時整句不見）。先讓出一次，讓排好的那一句真的進佇列。
     await asyncio.sleep(0)
-    try:
-        await asyncio.wait_for(mt_q.join(), timeout=15)
-    except asyncio.TimeoutError:
-        pass
+    # V1.38 審查第 4 輪：平常最後一句 1 秒內就翻完；3 秒還沒好（翻譯卡住）就照實講還有幾句、最多再等多久（總共 15 秒，跟以前一樣）
+    waiting[0] = len(pending) + mt_q.qsize()
+    join_t = asyncio.ensure_future(mt_q.join())
+    done, _ = await asyncio.wait({join_t}, timeout=3)
+    if not done:
+        waiting[0] = len(pending) + mt_q.qsize()
+        print(f"{DIM}  還有 {waiting[0]} 句在等翻譯，最多再等 12 秒；等不到的也會存原文，譯文標「{LATE_MT}」{RESET}")
+        await asyncio.wait({join_t}, timeout=12)
+    join_t.cancel()
+    waiting[0] = 0                  # 等完了（拿到或放棄）：接下來是存檔，第二次 Ctrl+C 照原本的說法
     tr_task.cancel(); tk_task.cancel()
+    # V1.38（10-05 X7h）：等不到翻譯的句子（Google 那一次呼叫卡住，後面的都排在它後面）原文照樣存、譯文標 LATE_MT，收尾照實講。
+    #    以前整句連原文一起丟掉、畫面還打 ✅（X7h 實測卡 51 秒，最後 7 句沒存；斷網模擬重現：16 句只存 5 句）。
+    late = late_rows(pending, mt_q)
+    for t, s, _born, _frag, turn in late:
+        out.add(t, s, LATE_MT, None, turn)          # 沒有譯文：不印延遲
+        out.nomt.add(len(out.rows) - 1)
+    out.late, out.failed = len(late), mt_stats["failed"]
     src.close()
     n = out.save(want_srt=a.srt)
-    print(f"\n\n{'✅' if n else '⚠'} 共 {n} 句" + ("" if n else "（整場沒有辨識到任何話，請確認聲音來源有聲音）"))
+    saved[0] = True
+    print(f"\n\n{'✅' if n and not (late or out.failed) else '⚠'} 共 {n} 句" + ("" if n else "（整場沒有辨識到任何話，請確認聲音來源有聲音）"))
+    if late:
+        print(f"{YEL}   其中 {len(late)} 句結束時翻譯還沒回來（翻譯一直沒有回應）：原文有存，譯文標成「{LATE_MT}」{RESET}")
+    if out.failed:
+        print(f"{YEL}   其中 {out.failed} 句翻譯失敗（重試三次都沒拿到）：原文有存，譯文標成「（翻譯失敗 …）」{RESET}")
     if out.num_pairs:
         print(f"{DIM}   存檔時照 Google 的定稿更正 {len(out.num_pairs)} 個原文數字"
               f"（{'、'.join(f'{x} → {y}' for x, y in out.num_pairs[:3])}{'…' if len(out.num_pairs) > 3 else ''}；"

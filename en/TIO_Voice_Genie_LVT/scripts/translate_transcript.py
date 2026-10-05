@@ -17,7 +17,7 @@
   python translate_transcript.py 演講.srt --to zh-TW            # 英文字幕 → 中英對照
   python translate_transcript.py 會議.mp3 --glossary 深耕計畫=Higher Education Sprout Project
 """
-import os, sys, io, json, re, argparse, subprocess, time, logging
+import os, sys, io, json, re, argparse, subprocess, time, logging, signal
 
 if __name__ == "__main__":      # 被 import 時不要動 stdout，會互相關掉底層 buffer
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8",
@@ -25,6 +25,7 @@ if __name__ == "__main__":      # 被 import 時不要動 stdout，會互相關�
 
 from google import genai
 from google.genai import types
+from google.genai import errors as gerr
 
 # 🔴 SDK 的英文警告（AFC…）是給開發者看的，同事看到會以為出錯了。只顯示真正的錯誤。
 logging.getLogger("google_genai").setLevel(logging.ERROR)
@@ -32,6 +33,9 @@ logging.getLogger("google_genai").setLevel(logging.ERROR)
 MODEL = "gemini-3.5-flash"          # 純文字翻譯，便宜又夠好
 BATCH = 25                          # 一次翻幾段（太多會漏段，太少會失去上下文）
 RETRY = 4                           # 每批最多試幾次（含第一次）
+NET_WAIT_STEP = 20                  # V1.38（待辦 20）：網路斷了（查不到伺服器位址）時，每幾秒再試一次
+NET_WAIT_MAX = 300                  # 同一次斷網最多等幾秒；等滿還沒回來才停（已翻好的照樣存檔）
+_net_waited = 0                     # 這一次斷網已經等了幾秒：任何一次呼叫成功、或伺服器有回應就歸零（整份共用，見 _retry）
 
 
 def _permanent(exc):
@@ -39,6 +43,7 @@ def _permanent(exc):
     這個錯誤重試有沒有意義？
 
     🔴 額度用完、金鑰失效、DNS 掛掉這幾種，重試一百次也一樣。
+       V1.38：DNS 掛掉（＝網路斷了）_retry 會先等網路回來（最多 NET_WAIT_MAX 秒），等滿還沒回來才算在這裡。
        原本一律退避重試的後果：兩小時的逐字稿有 56 批、每批空轉 14 秒，
        接著補跑迴圈**逐段**再各試 14 秒 —— 1400 段就是 5 小時以上的空轉，
        而且畫面上看起來像在工作。這是 2026-09-10 稽核抓到的。
@@ -51,6 +56,16 @@ def _permanent(exc):
         return False
 
 
+def _net_down(exc):
+    """V1.38（待辦 20）：網路斷了（查不到伺服器位址）——等網路回來就會好。判準住在 _live.net_down（跟「連不到網路」同一條）。"""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _live import net_down
+        return net_down(exc)
+    except Exception:
+        return False
+
+
 def _retry(fn, **kw):
     """
     呼叫 API，失敗就退避重試。
@@ -59,17 +74,38 @@ def _retry(fn, **kw):
        讓整個程式死掉、一個檔案都不留 —— 而前面那些批次的錢已經花掉了。
     """
     import time
-    last = None
-    for k in range(RETRY):
+    global _net_waited
+    last, k = None, 0
+    while True:
         try:
-            return fn(**kw)
+            r = fn(**kw)
         except Exception as e:
             last = e
-            if _permanent(e) or k == RETRY - 1:
-                break              # 重試沒有意義，立刻交還給呼叫端
+            if _net_waited and isinstance(e, gerr.APIError) and not _net_down(e):
+                # V1.38 審查（#5）：伺服器有回應（503、429…）＝網路回來了，這一次斷網的等待歸零（見 transcribe_meeting._with_retry；
+                #    第 2 輪：被判成網路斷了的錯誤頁不算、不說「繼續翻」）
+                print(f"  ✓ The internet connection is back (waited {_net_waited} seconds)")
+                _net_waited = 0
+            if _net_down(e) and _net_waited < NET_WAIT_MAX:
+                # V1.38（待辦 20）：網路斷了不再當成「重試也不會好」，先等網路回來（同一次斷網最多 NET_WAIT_MAX 秒，整份共用）
+                if _net_waited == 0:
+                    print(f"  ⚠ The internet connection is down, so waiting for it to come back: trying again every {NET_WAIT_STEP} seconds, for up to {NET_WAIT_MAX // 60} minutes")
+                else:
+                    print(f"  … The internet connection isn't back yet; trying again in {NET_WAIT_STEP} seconds (waited {_net_waited} seconds so far)")
+                time.sleep(NET_WAIT_STEP)
+                _net_waited += NET_WAIT_STEP
+                continue
+            if _permanent(e) or _net_down(e) or k == RETRY - 1:
+                break              # 重試沒有意義（網路斷了的已經等滿），立刻交還給呼叫端
             wait = 2 ** k * 2      # 2, 4, 8 秒
             print(f"  ⚠ Connection trouble ({type(e).__name__}); trying again in {wait} seconds…")
             time.sleep(wait)
+            k += 1
+            continue
+        if _net_waited:
+            print(f"  ✓ The internet connection is back (waited {_net_waited} seconds); carrying on with the translation")
+            _net_waited = 0
+        return r
     raise last
 AUDIO_EXT = {".mp3", ".m4a", ".wav", ".wma", ".aac", ".flac", ".ogg", ".opus",
              ".mp4", ".mov", ".mkv", ".avi", ".webm"}
@@ -289,16 +325,31 @@ def translate(client, segs, src_lang, tgt_lang, glossary, extra_note):
             for d in json.loads(r.text):
                 out[d["i"]] = unescape(d["text"])
             print(f"  Translated {min(i+BATCH, len(segs))}/{len(segs)} paragraphs")
+        except KeyboardInterrupt:
+            # V1.38 審查（#4）：等網路回來的時候（或任何時候）按 Ctrl+C，已經翻好的照樣存檔（以前整份丟掉、一個檔都不留，
+            #    前面幾批的錢白花）。一段都還沒翻好就照舊直接中斷（沒有東西可存）。
+            if not out:
+                raise
+            signal.signal(signal.SIGINT, signal.SIG_IGN)     # 審查第 2 輪：檔案寫完之前再按 Ctrl+C 不要打斷（main() 寫完就恢復）
+            print("\n  ⚠ Ctrl+C pressed: stopping here; what has already been translated will still be saved.")
+            dead = KeyboardInterrupt()
+            break
         except Exception as e:
             # 🔴 這一批放棄，但不要讓整份翻譯陪葬。
             #    前面幾批的錢已經花了，硬要中止等於把使用者付過的東西丟掉。
             print(f"  ✗ Batch {i // BATCH + 1} could not be translated ({type(e).__name__}); these paragraphs stay blank for now, and you will be told at the end which are missing")
-            if _permanent(e):
+            if _permanent(e) or _net_down(e):
                 # 🔴 額度用完／金鑰失效這種，繼續跑只是把剩下每一批都撞一次牆。
                 #    兩小時的逐字稿有 56 批，一批一批撞完要十幾分鐘，
                 #    而畫面上看起來像在工作。立刻收手，把已翻好的存下來。
+                # V1.38：網路斷了的已經在 _retry 等過（同一次斷網最多 NET_WAIT_MAX 秒）還沒回來，才會走到這裡。
+                #    「已經翻好的部分還是會存檔」只在真的有翻好的時候講（審查 #2）。
                 dead = e
-                print("  ✗ Retrying will not fix this error, so stopping here; what has already been translated will still be saved.")
+                kept = "; what has already been translated will still be saved" if out else ""
+                if _net_down(e):
+                    print(f"  ✗ The internet connection didn't come back (waited {NET_WAIT_MAX // 60} minutes), so stopping here{kept}.")
+                else:
+                    print(f"  ✗ Retrying will not fix this error, so stopping here{kept}.")
                 break
 
     missing = [j for j in range(len(segs)) if j not in out]
@@ -312,8 +363,18 @@ def translate(client, segs, src_lang, tgt_lang, glossary, extra_note):
                            contents=f"把這句{src_name}翻成{tgt_name}，只回譯文：\n{segs[j]['text']}",
                            config=types.GenerateContentConfig(temperature=0))
                 out[j] = unescape(r.text)
-            except Exception:
-                pass
+            except KeyboardInterrupt:
+                if not out:
+                    raise
+                signal.signal(signal.SIGINT, signal.SIG_IGN)     # 同上
+                print("\n  ⚠ Ctrl+C pressed: stopping here; what has already been translated will still be saved.")
+                dead = KeyboardInterrupt()
+                break
+            except Exception as e:
+                if _net_down(e):
+                    # V1.38 審查（#9）：_retry 已經等滿 NET_WAIT_MAX 網路還沒回來——剩下的一段一段撞只是空轉，不補了
+                    print(f"  ✗ The internet connection didn't come back (waited {NET_WAIT_MAX // 60} minutes), so the rest will not be retried.")
+                    break
     still = [j for j in range(len(segs)) if j not in out]
     if still:
         print(f"  ⚠ {len(still)} paragraph(s) still could not be translated; they will be marked in the files.")
@@ -521,14 +582,25 @@ def main():
     ok_n = sum(1 for t in trans if t)
     # 🔴 輸入是音檔時，名字已經由 transcribe_meeting 套好、存在中繼稿的 meta 裡（切段時只套第 1 段，V1.22 ③）；
     #    這裡再照順序套一次，名字比第 1 段的人多時，多的會溢到第 2 段的講者身上。改成讀 meta 的。
-    files = write_outputs(stem, segs, trans, [] if ext in AUDIO_EXT else a.names, src, tgt, title,
-                          want_srt=a.srt, meta=meta)
+    try:
+        files = write_outputs(stem, segs, trans, [] if ext in AUDIO_EXT else a.names, src, tgt, title,
+                              want_srt=a.srt, meta=meta)
+    finally:
+        if isinstance(dead, KeyboardInterrupt):
+            signal.signal(signal.SIGINT, signal.default_int_handler)   # 檔案寫完（或寫檔出錯）都恢復 Ctrl+C（審查第 2、3 輪）
 
     # 🔴 一段都沒翻成功就**不是**完成。
     #    D2 把每批的例外都吞掉之後，額度用完也會照樣產出一份「全是
     #    （這段沒翻到）」的檔案，回傳碼還是 0 —— 選單看到檔案存在就印
     #    綠色 ✅，同事以為成功、把音檔再跑一次，付第二次轉錄費。
     #    2026-09-10 稽核抓到，這是 D2 自己造成的。
+    if isinstance(dead, KeyboardInterrupt) and ok_n < len(trans):
+        # V1.38 審查（#4）：按了 Ctrl+C、已經有翻好的段落（translate() 一段都沒翻好時照舊直接中斷）——存好了，照實講、回傳 1（沒有完成）。
+        #    第 2 輪：Ctrl+C 剛好在全部翻完之後才到 → 照完成處理（往下走）
+        print(f"\n⚠ Interrupted: of {len(trans)} paragraphs, {ok_n} were translated; the untranslated ones are marked in the files:")
+        for f in files:
+            print(f"   {f}")
+        return 1
     if ok_n == 0:
         print("\n✗ Not a single paragraph was translated; the files produced contain no translation.")
         if dead is not None:
@@ -576,8 +648,12 @@ def _explain(exc):
     if not isinstance(exc, subprocess.SubprocessError):
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from _live import diagnose
+            from _live import diagnose, net_down, NET_DOWN_TITLE
             need, title, hint = diagnose(exc)
+            if not need and net_down(exc):
+                # V1.38 審查第 2 輪：「網路無法連線」那三種（10050／10051／10065）diagnose 不算要人介入，但走到這裡已經等滿
+                #    NET_WAIT_MAX 網路還沒回來——照「連不到網路」講，不要印英文技術錯誤叫人跑診斷
+                need, title, hint = True, NET_DOWN_TITLE, "The internet connection didn't come back.\n      → Run the translation again once the network is working"
         except Exception:
             pass
     print()

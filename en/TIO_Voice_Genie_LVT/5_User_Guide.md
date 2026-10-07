@@ -15,7 +15,7 @@ A black window opens, looking like this:
   ════════════════════════════════════════════
 
   1  Live meeting captions    – see captions while the meeting runs
-  2  Recording to transcript  – turn a recorded file into text
+  2  Recording to transcript  – turn an audio or video recording into text
   3  Live bilingual captions  – source + translation together (Chinese, English, Japanese)
   4  Transcript to bilingual  – translate the whole file, far better than live
   5  Rebuild a transcript     – redo from .json / rename speakers, free
@@ -63,7 +63,7 @@ press `1` and it opens automatically.
        press `2` only if you need to pick up sound from loudspeakers (full capture; there is no guarantee it will be picked up; see "How to set up a hybrid meeting" below)
    - Press `3` = Both (you are in an online meeting and also want your own voice picked up)
      → it also asks "Which microphone?". If you chose **Only use that one**, unplugging the headset stops only the **microphone** feed;
-       the computer audio still gets captions (once the headset is unplugged, the sound plays from the laptop speakers instead, and the program switches to recording those speakers)
+       the computer audio still gets captions (once the headset is unplugged, the sound plays from the laptop speakers instead, and the program switches to recording those speakers; at the moment you unplug or plug in, the computer audio may also drop for about 1 second, and it reconnects by itself)
 3. It asks for **proper nouns** → type terms like "深耕計畫 研發處 會計室" (Higher Education Sprout Project, Office of Research and Development, Accounting Office), with a single space between them, written the way they should appear in the transcript
    (this step matters: it makes a big difference to accuracy. If you don't want to, just press Enter to skip it)
 4. It asks what the meeting is called → type anything, or just press Enter
@@ -93,8 +93,8 @@ and you want to turn it into text with speakers and times.
 **How to do it:**
 
 1. Double-click the desktop icon → press `2` → Enter
-2. **A file picker opens** → find your recording and click "Open"
-   (mp3, m4a, wav, even an mp4 video file all work; it handles them itself)
+2. **A file picker opens** → find your recording (audio or video) and click "Open"
+   (mp3, m4a, wav, or video files such as mp4 and webm (videos recorded in a browser) all work; it handles them itself)
 3. It asks for **proper nouns** → type terms like "深耕計畫 研發處 會計室 教學組長" (Higher Education Sprout Project, Office of Research and Development, Accounting Office, Teaching Section Chief)
 4. It asks for **speaker names** → type them in the order of "who speaks first", for example "Chair Wang, Ms Li" (separate the names with commas, so a name can contain spaces, such as a full name; if no name contains a space, spaces work too)
    (if you don't know, just press Enter and they become "Speaker 1", "Speaker 2"; recordings over 28 minutes are split into parts, and the names only apply to part 1; see below)
@@ -176,12 +176,13 @@ when you want to **see the English original and the Chinese translation at the s
    - Press `2` = Microphone (a guest is giving a talk in the room) → it also asks "Does any of the sound in the room come from loudspeakers (speakers) and also need captions?"; normally press `1`
    - Press `3` = **Both** (hybrid meeting: in person + online)
      → it asks "Which microphone?" (same as feature 1). If you chose **Only use that one**, unplugging the headset stops only the **microphone** feed;
-       the computer audio still gets captions
+       the computer audio still gets captions (it may drop for about 1 second at the moment you unplug or plug in, and reconnects by itself)
    - Press `4` = **Saved audio/video file** ← you pick the file; no other sound is recorded
 3. **It asks "Fast or accurate?"**
    - Press `1` **Accurate** (recommended): waits until the whole sentence is finished before translating; about 2–3 seconds behind; the translation's word order is natural
    - Press `2` **Fast**: translates while listening; about 1 second behind, but the word order is sometimes awkward
 4. It asks which language to translate into → press `1` Traditional Chinese (Taiwan), `2` Japanese, `3` English
+   (no need to set the speaker's language first; the program works it out by itself — tested on 2026-10-07: talks in French, Spanish and Japanese translated into English came out the same as when the speaker's language was set)
 5. Press Enter to start
 
 **The screen looks like this:**
@@ -263,6 +264,9 @@ the delay depends on which mode you chose in the previous step: about 2–3 seco
 ### 🔴 Once it has started, don't unplug or plug in the headset
 
 - If the headset plug works loose or is pulled out, the program **reconnects automatically**, and the screen shows "⚠ Microphone disconnected…" → "✓ Microphone reconnected"; but there are no captions for the few seconds it was disconnected
+- **Computer audio** (online meetings, videos) also reconnects automatically: unplugging or plugging in the headset can make the computer-audio feed drop briefly even if the speakers themselves weren't unplugged;
+  the screen shows "⚠ Computer audio can no longer be captured…"; the computer audio comes back after about 1 second, and once it is stable the screen says "✓ Computer audio reconnected" (usually about 1 second later); in features 1 and 3, if the Windows default playback device changed too, it says "✓ Computer audio is now recorded from: …".
+  Up to V1.38, when the recording dropped like this without the speakers being unplugged, it did not reconnect by itself; you had to press Ctrl + C and start again
 - The **interpreter voice** in feature 6 also reconnects automatically: the screen shows "⚠ Interpreter voice cut out…" → "✓ Interpreter voice reconnected". When the interpretation plays through speakers, it cuts out briefly, for at most about 2–3 seconds
   (unplugging or plugging in the headset makes it cut out briefly even if the speakers themselves weren't unplugged); when it plays through headphones, it waits until the headphones are plugged back in and comes back about 1 second after that
 - To change the headset or speakers, the safest way is to press Ctrl + C to stop first, then start again (the captions are saved as two files)
@@ -345,12 +349,12 @@ Check these four things:
    with a semicolon `;` between pairs (spaces inside a translation are fine).
    That way proper nouns are translated the same way throughout, not one way here and another way there
 5. The background of this document (optional): for example "Research Office meeting on the Sprout Project"; the model then translates more aptly
-6. **Proper nouns** (optional; only asked when you pick an audio file): give it unit names, project names and people's names first; it makes a big difference to accuracy
+6. **Proper nouns** (optional; only asked when you pick an audio or video file): give it unit names, project names and people's names first; it makes a big difference to accuracy
 7. **Speaker names** (optional): if you fill them in, the speaker column in the finished document says "Director", "Secretary",
    instead of "Speaker 1", "Speaker 2" (when translating into English, speakers you haven't named are written as Speaker 1; in Japanese, as 話者1, Japanese for "Speaker 1").
    If you pick a `.json`, it first prints each speaker's first line so you can match names to voices;
    if you **already filled in names** for that transcript in feature 2, just press Enter to keep those names; no need to type them again.
-   If you pick an audio file, it hasn't been transcribed yet and doesn't know how many speakers there are, so type them "in the order they first speak"; if you're not sure, just press Enter
+   If you pick an audio or video file, it hasn't been transcribed yet and doesn't know how many speakers there are, so type them "in the order they first speak"; if you're not sure, just press Enter
 8. Wait for it to finish
 
 **It produces four kinds of file** (on the desktop, all starting with the same file name):
@@ -459,7 +463,7 @@ If it crashes or is force-closed partway through, it switches back automatically
 5. If you chose "Microphone" or "Saved audio/video file", it asks instead **Where do you want to hear the interpreter voice?**: choose the headphones you are wearing (the list marks the current default),
    and once you've chosen, it plays a test beep so you can check; if you didn't hear it, choose "No, choose again".
    (If the computer has only one usable playback device, it doesn't ask, and the interpretation comes straight out of that device)
-6. Choose the language to translate into
+6. Choose the language to translate into (no need to set the speaker's language first; the program works it out by itself)
 7. Press Enter to start
 
 > **Meeting apps need setting separately**: Teams/Zoom/Webex have their own speaker settings, which don't necessarily follow Windows.
@@ -613,7 +617,7 @@ and it doesn't come back until that afternoon; a long afternoon meeting may find
 | The same sentence appears twice | Echo in a hybrid meeting: the meeting computer's speakers and microphone are picking each other up; switch to headphones |
 | The people in the room are picked up, but not the people online | The online participants have to be taken straight from the computer: the caption computer joins the meeting too, and you choose "Both" (see "Option 1" in the hybrid meeting section above). Turning up the speaker volume doesn't help |
 | The caption text is too small | In the caption window, press Ctrl + "+" to enlarge it (you can press it repeatedly) and Ctrl + "-" to shrink it; there's a reminder of this on screen at the start too (Ctrl + 0 is the official "reset font size" key, but it clashes with the Going Natural (自然輸入法) Chinese input method, so we don't teach it) |
-| The captions suddenly stop (the headset plug came loose, or it was unplugged and plugged back in) | The program reconnects automatically and shows "✓ Microphone reconnected"; if that never appears, press Ctrl + C to stop and start again (all the captions so far have been saved) |
+| The captions suddenly stop (the headset plug came loose, or it was unplugged and plugged back in) | The program reconnects automatically and shows "✓ Microphone reconnected" or "✓ Computer audio reconnected" (or "✓ Computer audio is now recorded from: …" when it switches to another device); if that never appears, press Ctrl + C to stop and start again (all the captions so far have been saved) |
 | Chinese text shows up as boxes or garbled characters | Open it with "Windows Terminal" instead (search the taskbar for "Terminal"); the older black Command Prompt window handles Chinese fonts poorly |
 | The captions show Simplified Chinese characters | Most cases have been dealt with; **two remain**: ① with feature 3 on "Fast", or with feature 6, when Chinese is being translated into another language, the **source** line on top is occasionally a whole block of Simplified Chinese (roughly once in three sessions); the translation is unaffected. This has been tested over 29 connections: whether Google is told to use Traditional characters for the source, or even the opposite, Simplified, the model ignores it — it's not a setting that's wrong, it simply can't be changed. ② with feature 3 on "Accurate" and "Translate into Traditional Chinese (Taiwan)", when the speaker is speaking Chinese (for example, people speaking Chinese in the room at a hybrid meeting), the source comes out in Simplified Chinese (seen once in testing, 2026-09-19); the translation is still in Traditional Chinese, it just amounts to rewriting the Chinese. If you really need that source text: paste the `.txt` into any Simplified-to-Traditional converter website; in case ① you can also switch to feature 3's "Accurate" mode (in Accurate mode the source comes from a different model, which uses Traditional characters as instructed; feature 6 has no "Accurate" mode to switch to)|
 | You choose "Microphone" with headphones plugged in: which microphone does it pick up? | On some computers (for example laptops where the headphones and microphone share one jack, i.e. a combined headset jack), plugging in headphones automatically switches to the **microphone on the headphones**, and it only switches back to the computer's microphone when you unplug them (tested on one laptop, 2026-09-19). If the headphones are plugged in but not worn and you choose "Microphone", it picks up the headset microphone hanging to one side — unplug the headphones, or go to "Settings → System → Sound → Input" and switch back to the computer's microphone. At the start, the screen shows which one it is using (the "Microphone: …" line) |

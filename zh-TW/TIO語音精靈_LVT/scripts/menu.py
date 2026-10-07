@@ -114,16 +114,17 @@ def pick_file(transcript=False, json_only=False):
             return p
         # 🔴 2026-09-20 筆電實測 N6-6：功能 4（transcript=True）預設只列 .json／.srt，標題卻寫「選擇會議錄音檔」
         p = filedialog.askopenfilename(
-            title="選擇逐字稿、字幕或錄音檔" if transcript else "選擇會議錄音檔",
+            title="選擇逐字稿、字幕或錄音／錄影檔" if transcript else "選擇會議錄音或錄影檔",
             # 🔴 第一個篩選器就是視窗打開時的預設。標題說「逐字稿、字幕或錄音檔」，
             #    第一個卻是「逐字稿或字幕」，音檔整個看不到（2026-09-20 筆電 ⚠-5）。
+            # V1.39（10-07 使用者要求實測 .webm）：「音訊或影片」補 *.opus、*.webm（瀏覽器錄的影片常用；以前要切到「所有檔案」才看得到）。
             filetypes=([("所有支援的檔案",
                          "*.json *.srt *.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.opus "
                          "*.mp4 *.mov *.mkv *.avi *.webm"),
                         ("逐字稿或字幕", "*.json *.srt"),
-                        ("音訊或影片", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.mp4 *.mov *.mkv *.avi"),
+                        ("音訊或影片", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.opus *.mp4 *.mov *.mkv *.avi *.webm"),
                         ("所有檔案", "*.*")] if transcript else
-                       [("音訊或影片", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.mp4 *.mov *.mkv *.avi"),
+                       [("音訊或影片", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.opus *.mp4 *.mov *.mkv *.avi *.webm"),
                         ("所有檔案", "*.*")]))
         r.destroy()
         return p
@@ -189,7 +190,7 @@ def ask_speaker_names(path, to=None):
             print(C(f"    {who} 第一句：{txt}…", DIM))
         print(C(f"  照順序填 {n_spk} 個，用空白隔開；名字本身有空白（例如英文全名）就改用逗號隔開。", DIM))
     else:
-        print(C("  這是音檔，還沒轉檔、現在還不知道有幾位講者。", DIM))
+        print(C("  這是影音檔，還沒轉檔、現在還不知道有幾位講者。", DIM))
         print(C("  知道的話照「先開口的順序」填，用空白隔開（名字本身有空白就改用逗號）；不確定就直接 Enter。", DIM))
     # 🔴 to 是 None（功能 4 選「1 自動判斷」，而且它是第一個選項）時，目標語言要等
     #    translate_transcript 自己判：中文稿→英文（Speaker 1）、英文稿→臺灣繁體（講者1），
@@ -486,8 +487,8 @@ def do_live():
 
 
 def do_transcribe():
-    print(C("\n【錄音檔轉逐字稿】", BOLD))
-    print("  已經錄好的會議錄音，轉成有講者、有時間的繁體逐字稿。")
+    print(C("\n【影音檔轉逐字稿】", BOLD))
+    print("  已經錄好的會議錄音或錄影，轉成有講者、有時間的繁體逐字稿。")
     print(C("\n  正在開啟選檔視窗…（如果沒看到，請看工作列）", DIM))
     path = pick_file()
     if not path or not os.path.exists(path):
@@ -583,9 +584,11 @@ def do_translate():
 
     note = _in("\n這份文件的背景？（選填，例：研發處深耕計畫會議）：").strip()
 
+    # V1.39（10-07 實測 .webm 時找到，V1.38 以前就這樣）：要跟 translate_transcript.AUDIO_EXT 一樣。以前少了 .opus／.webm——
+    #    翻譯程式照樣當成錄音、先轉逐字稿，選單卻不問專有名詞、也沒先算好中繼逐字稿的檔名（桌面上同名的逐字稿會被蓋掉）。
     is_audio = os.path.splitext(path)[1].lower() in {
-        ".mp3", ".m4a", ".wav", ".wma", ".aac", ".flac", ".ogg",
-        ".mp4", ".mov", ".mkv", ".avi"}
+        ".mp3", ".m4a", ".wav", ".wma", ".aac", ".flac", ".ogg", ".opus",
+        ".mp4", ".mov", ".mkv", ".avi", ".webm"}
     vocab = ask_vocab() if is_audio else []
     spk_names = ask_speaker_names(path, to)
 
@@ -605,7 +608,7 @@ def do_translate():
                          os.path.splitext(os.path.basename(path))[0] + "_逐字稿"),
             (".md", ".json")) + ".md"
         args += ["--interim-out", interim]
-        print(C(f"  （這是音檔，會先轉一次逐字稿：{os.path.basename(interim)}）", DIM))
+        print(C(f"  （這是影音檔，會先轉一次逐字稿：{os.path.basename(interim)}）", DIM))
     if to:
         args += ["--to", to]
     if gl_pairs:
@@ -618,7 +621,7 @@ def do_translate():
         args += ["--vocab"] + vocab
 
     if is_audio:
-        print(C("\n※ 這是音檔，會先轉逐字稿再翻，時間比較久。", YEL))
+        print(C("\n※ 這是影音檔，會先轉逐字稿再翻，時間比較久。", YEL))
     _in(C("\n按 Enter 開始…", GRN))
     rc = run(args, "翻譯中")
 
@@ -703,10 +706,14 @@ def do_bilingual():
     ])
     hq = (q == "1")
 
+    # V1.39（使用者 10-07）：英文選項拿掉「聽中文演講、要英文字幕時」——講者說什麼語言都不用先設定。
+    #    10-07 實測：「準」翻成英文時程式把講者語言寫死成中文（live_bilingual_hq.py 的 src_lang），講者說法文、西班牙文、日文
+    #    照樣轉得對、翻得對，跟指定正確語言幾乎一樣（tio-v139\pretest）；「快」本來就自動判斷。
+    print(C("\n  講者說什麼語言不用先設定，程式會自己聽出來。", DIM))
     lang = ask("要翻成什麼語言？", [
         ("1", "繁體中文（台灣）"),
         ("2", "日文"),
-        ("3", "英文（聽中文演講、要英文字幕時）"),
+        ("3", "英文"),
     ])
     # 🔴 準確、快速共用同一份對應表。原本各有一份，快速模式那份寫成 en-US ——
     #    翻譯模型不收，每次連線都被 1007 拒絕、零字幕、無限重連
@@ -974,10 +981,13 @@ def do_voice_translate():
 
     mic_dev = ask_mic_device() if m == "2" else None
 
+    # V1.39（使用者 10-07）：英文選項拿掉「聽中文演講、要英文語音時」——口譯模型只設定要翻成什麼語言，講者說的語言由它自己判斷
+    #    （Google〈Live translation with Gemini Live API〉：70 多種語言）。
+    print(C("\n  講者說什麼語言不用先設定，程式會自己聽出來。", DIM))
     lang = ask("要翻成什麼語言？", [
         ("1", "繁體中文（台灣）"),
         ("2", "日文"),
-        ("3", "英文（聽中文演講、要英文語音時）"),
+        ("3", "英文"),
     ])
     # 🔴 語言碼跟功能 3 共用同一份對應表的值，改的時候兩邊要一起改。
     #    zh-TW 與官方語言表的 zh-Hant 實測等價（各 3 次，都出繁體臺灣用語）；
@@ -1295,7 +1305,7 @@ def main():
             route_note = None
         c = ask("請輸入號碼後按 Enter：", [
             ("1", "會議即時字幕      － 開會當下就看到字幕"),
-            ("2", "錄音檔轉逐字稿    － 已錄好的檔案轉成文字"),
+            ("2", "影音檔轉逐字稿    － 已錄好的錄音、錄影轉成文字"),
             ("3", "即時雙語字幕      － 同時出原文＋譯文（可翻中英日文）"),
             ("4", "逐字稿轉雙語對照  － 整份翻，品質比即時翻好很多"),
             ("5", "逐字稿重新排版    － 從 .json 重做／改講者名字，不花錢"),

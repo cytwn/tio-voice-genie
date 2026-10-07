@@ -879,6 +879,8 @@ async def run(a):
     #    翻成其他語言時講者說中文，指定 cmn-Hant-TW。
     #    🔴 已知例外：混合會議現場有人講中文、又選翻成繁體中文時，原文會是簡體（2026-09-19 筆電 R4，
     #       交接報告 M2，手冊 FAQ「字幕出現簡體字」②）。要改成一律帶 cmn-Hant-TW，先實測英文轉錄會不會變差。
+    #    V1.39（2026-10-07 實測）：講者其實說法文、西班牙文、日文時，帶 cmn-Hant-TW 跟指定正確語言、跟不指定，原文與英譯幾乎一樣
+    #    （tio-v139\pretest）——所以選單不必叫人「講中文才選英文」。不要為了外語講者把這行改成不指定：中文講者會整段變簡體（上面 09-11 實測）。
     src_lang = a.source_lang or (None if a.target == "zh-TW" else "cmn-Hant-TW")
     cfg = types.LiveConnectConfig(
         response_modalities=["TEXT"],

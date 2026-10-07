@@ -114,16 +114,17 @@ def pick_file(transcript=False, json_only=False):
             return p
         # 🔴 2026-09-20 筆電實測 N6-6：功能 4（transcript=True）預設只列 .json／.srt，標題卻寫「選擇會議錄音檔」
         p = filedialog.askopenfilename(
-            title="Choose a transcript, captions or recording file" if transcript else "Choose a meeting recording",
+            title="Choose a transcript, captions or an audio/video recording" if transcript else "Choose a meeting recording (audio or video)",
             # 🔴 第一個篩選器就是視窗打開時的預設。標題說「逐字稿、字幕或錄音檔」，
             #    第一個卻是「逐字稿或字幕」，音檔整個看不到（2026-09-20 筆電 ⚠-5）。
+            # V1.39（10-07 使用者要求實測 .webm）：「音訊或影片」補 *.opus、*.webm（瀏覽器錄的影片常用；以前要切到「所有檔案」才看得到）。
             filetypes=([("All supported files",
                          "*.json *.srt *.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.opus "
                          "*.mp4 *.mov *.mkv *.avi *.webm"),
                         ("Transcripts or captions", "*.json *.srt"),
-                        ("Audio or video", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.mp4 *.mov *.mkv *.avi"),
+                        ("Audio or video", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.opus *.mp4 *.mov *.mkv *.avi *.webm"),
                         ("All files", "*.*")] if transcript else
-                       [("Audio or video", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.mp4 *.mov *.mkv *.avi"),
+                       [("Audio or video", "*.mp3 *.m4a *.wav *.wma *.aac *.flac *.ogg *.opus *.mp4 *.mov *.mkv *.avi *.webm"),
                         ("All files", "*.*")]))
         r.destroy()
         return p
@@ -189,7 +190,7 @@ def ask_speaker_names(path, to=None):
             print(C(f"    {who} – first line: {txt}…", DIM))
         print(C(f"  Enter {n_spk} names in this order, separated by commas (a name can contain spaces, e.g. a full name; if no name contains a space, spaces work too).", DIM))
     else:
-        print(C("  This is an audio file that has not been transcribed yet, so the number of speakers is not known yet.", DIM))
+        print(C("  This is an audio or video file that has not been transcribed yet, so the number of speakers is not known yet.", DIM))
         print(C("  If you know them, enter the names \"in the order they first speak\", separated by commas (if no name contains a space, spaces work too); if unsure, just press Enter.", DIM))
     # 🔴 to 是 None（功能 4 選「1 自動判斷」，而且它是第一個選項）時，目標語言要等
     #    translate_transcript 自己判：中文稿→英文（Speaker 1）、英文稿→臺灣繁體（講者1），
@@ -478,7 +479,7 @@ def do_live():
 
 def do_transcribe():
     print(C("\n[Recording to transcript]", BOLD))
-    print("  Turns a meeting you have already recorded into a Traditional Chinese transcript with speakers and times.")
+    print("  Turns a meeting you have already recorded (audio or video) into a Traditional Chinese transcript with speakers and times.")
     print(C("\n  Opening the file picker… (if you don't see it, check the taskbar)", DIM))
     path = pick_file()
     if not path or not os.path.exists(path):
@@ -573,9 +574,11 @@ def do_translate():
 
     note = _in("\nWhat is the background of this document? (optional, e.g. Research Office meeting on the Sprout Project): ").strip()
 
+    # V1.39（10-07 實測 .webm 時找到，V1.38 以前就這樣）：要跟 translate_transcript.AUDIO_EXT 一樣。以前少了 .opus／.webm——
+    #    翻譯程式照樣當成錄音、先轉逐字稿，選單卻不問專有名詞、也沒先算好中繼逐字稿的檔名（桌面上同名的逐字稿會被蓋掉）。
     is_audio = os.path.splitext(path)[1].lower() in {
-        ".mp3", ".m4a", ".wav", ".wma", ".aac", ".flac", ".ogg",
-        ".mp4", ".mov", ".mkv", ".avi"}
+        ".mp3", ".m4a", ".wav", ".wma", ".aac", ".flac", ".ogg", ".opus",
+        ".mp4", ".mov", ".mkv", ".avi", ".webm"}
     vocab = ask_vocab() if is_audio else []
     spk_names = ask_speaker_names(path, to)
 
@@ -595,7 +598,7 @@ def do_translate():
                          os.path.splitext(os.path.basename(path))[0] + "_transcript"),
             (".md", ".json")) + ".md"
         args += ["--interim-out", interim]
-        print(C(f"  (This is an audio file, so it will be transcribed first: {os.path.basename(interim)})", DIM))
+        print(C(f"  (This is an audio or video file, so it will be transcribed first: {os.path.basename(interim)})", DIM))
     if to:
         args += ["--to", to]
     if gl_pairs:
@@ -608,7 +611,7 @@ def do_translate():
         args += ["--vocab"] + vocab
 
     if is_audio:
-        print(C("\n※ This is an audio file: it will be transcribed first and then translated, so it takes longer.", YEL))
+        print(C("\n※ This is an audio or video file: it will be transcribed first and then translated, so it takes longer.", YEL))
     _in(C("\nPress Enter to start…", GRN))
     rc = run(args, "Translating")
 
@@ -691,10 +694,14 @@ def do_bilingual():
     ])
     hq = (q == "1")
 
+    # V1.39（使用者 10-07）：英文選項拿掉「聽中文演講、要英文字幕時」——講者說什麼語言都不用先設定。
+    #    10-07 實測：「準」翻成英文時程式把講者語言寫死成中文（live_bilingual_hq.py 的 src_lang），講者說法文、西班牙文、日文
+    #    照樣轉得對、翻得對，跟指定正確語言幾乎一樣（tio-v139\pretest）；「快」本來就自動判斷。
+    print(C("\n  No need to set the speaker's language first; the program works it out by itself.", DIM))
     lang = ask("Translate into which language?", [
         ("1", "Traditional Chinese (Taiwan)"),
         ("2", "Japanese"),
-        ("3", "English (when listening to a Chinese talk and you need English captions)"),
+        ("3", "English"),
     ])
     # 🔴 準確、快速共用同一份對應表。原本各有一份，快速模式那份寫成 en-US ——
     #    翻譯模型不收，每次連線都被 1007 拒絕、零字幕、無限重連
@@ -958,10 +965,13 @@ def do_voice_translate():
 
     mic_dev = ask_mic_device() if m == "2" else None
 
+    # V1.39（使用者 10-07）：英文選項拿掉「聽中文演講、要英文語音時」——口譯模型只設定要翻成什麼語言，講者說的語言由它自己判斷
+    #    （Google〈Live translation with Gemini Live API〉：70 多種語言）。
+    print(C("\n  No need to set the speaker's language first; the program works it out by itself.", DIM))
     lang = ask("Translate into which language?", [
         ("1", "Traditional Chinese (Taiwan)"),
         ("2", "Japanese"),
-        ("3", "English (when listening to a Chinese talk and you want to hear English)"),
+        ("3", "English"),
     ])
     # 🔴 語言碼跟功能 3 共用同一份對應表的值，改的時候兩邊要一起改。
     #    zh-TW 與官方語言表的 zh-Hant 實測等價（各 3 次，都出繁體臺灣用語）；
@@ -1275,7 +1285,7 @@ def main():
             route_note = None
         c = ask("Type a number and press Enter:", [
             ("1", "Live meeting captions    – see captions while the meeting runs"),
-            ("2", "Recording to transcript  – turn a recorded file into text"),
+            ("2", "Recording to transcript  – turn an audio or video recording into text"),
             ("3", "Live bilingual captions  – source + translation together (Chinese, English, Japanese)"),
             ("4", "Transcript to bilingual  – translate the whole file, far better than live"),
             ("5", "Rebuild a transcript     – redo from .json / rename speakers, free"),

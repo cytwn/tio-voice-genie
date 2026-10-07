@@ -1,7 +1,7 @@
 # TIO語音精靈
 
 用 Google 的 **Gemini 3.5 Transcribe / Live API** 做五件事：會議即時字幕、
-錄音檔轉繁體逐字稿、即時雙語字幕、逐字稿轉雙語對照文件、即時語音翻譯（口譯模式），
+錄音／錄影檔轉繁體逐字稿、即時雙語字幕、逐字稿轉雙語對照文件、即時語音翻譯（口譯模式），
 外加一支純本機的逐字稿重新排版。全部已在本機實測跑通。
 
 一般使用者從雙擊 `4_開始使用.bat` 開始，會看到中文選單，不需要打任何指令。
@@ -81,7 +81,7 @@ python scripts/live_caption.py --source system --vocab 深耕計畫 研發處
 > `.srt`（字幕軌）預設**不產生**——單獨點開只會跳出空的播放器，一般用不到。
 > 真的要拿去掛在影片上時，加 `--srt` 參數即可。
 
-### 2. 錄音檔 → 繁體逐字稿（含講者、時間軸）
+### 2. 錄音／錄影檔 → 繁體逐字稿（含講者、時間軸）
 
 ```bash
 python scripts/transcribe_meeting.py 會議錄音.m4a \
@@ -251,7 +251,7 @@ scripts/
   rescue.ps1                 8_刪不掉時救援.bat 呼叫的診斷腳本
   menu.py                    中文選單本體（4_開始使用.bat 呼叫這支）
   live_caption.py            會議即時字幕
-  transcribe_meeting.py      錄音檔 → 繁體逐字稿（含自動分段、失敗容錯）
+  transcribe_meeting.py      錄音／錄影檔 → 繁體逐字稿（含自動分段、失敗容錯）
   live_bilingual.py          即時雙語字幕・快速模式（邊聽邊翻）
   live_bilingual_hq.py       即時雙語字幕・準確模式（整句才翻，語序正常）
   translate_transcript.py    逐字稿/字幕 → 雙語對照文件

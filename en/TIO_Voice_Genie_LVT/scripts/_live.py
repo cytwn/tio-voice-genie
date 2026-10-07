@@ -1016,6 +1016,8 @@ def mix_lanes(src, n, grace=MIX_GRACE, max_blocks=5, poll=0.01):
 MIC_LOST_AFTER = 1.5   # 麥克風活著就一定每 100ms 送一塊（連降噪輸出的全 0 也會送）；這麼久沒有＝裝置掉了
 REOPEN_EVERY = 1.0     # 掉了之後每隔多久試一次
 DEFAULT_POLL = 1.0     # 多久問一次 Windows「現在預設是哪顆」（純 COM＋登錄檔，約 1 毫秒）
+STABLE_AFTER = 1.0     # V1.39 審查第 2 輪：側錄重開的那條撐過這麼久都沒回錯誤碼，才算接回（才講接回來了）
+SHAKY_WINDOW = 10.0    # V1.39 審查第 3 輪：講了接回來了之後這麼快又斷＝同一場不穩，下一次要穩定 2、4、8 秒才講
 # 🔴 完整收音（RAW）沒有 Windows 的濾波：耳麥 RAW 實測 51% 能量在 100Hz 以下（嗡聲），辨識 0 句；
 #    濾掉 120Hz 以下變 2 句，內建麥克風濾前濾後一樣（2026-09-22 筆電 E5）。
 MIC_HPF_HZ = 120
@@ -1440,7 +1442,11 @@ def capture_loopback(src, lane, chunk_ms, follow_default=True, say=print):
     cur_lb = None      # 錄的那一顆在 PyAudio 裡的側錄名稱（功能 6 重開時照它找回同一顆）
     cur_k = None       # 它是同名裡的第幾顆（兩顆同名時，功能 6 重開照這個順位，不看當下的預設：審查第三輪 #4）
     cur_n = None       # 開的時候同名的一共幾顆（功能 6 重開時同名的要全部到齊才接：審查第四輪 #1）
+    ok_name = ok_id = None   # V1.39 審查（中-1）：最後一條「真的讀得到」的串流錄的是哪一顆（名稱、端點 ID）——接回時拿它比
+    quick = 0                # V1.39 審查（中-2）：連著幾條「開得起來、一讀就壞」的串流（越多條就越晚再試）
+    ok_at, shaky = None, 0   # V1.39 審查第 3 輪中-1：上一次講接回來了的時間；講了之後很快又斷的次數（越多次，下一次要穩定越久才講）
     while not src.stop.is_set():
+        pending = None       # 這一輪的串流：None 還沒開／True 開了、還在試用期／False 穩定過——斷了時照這個算再試間隔（見 except）
         try:
             follow = follow_default or cur is None
             if follow:
@@ -1467,32 +1473,32 @@ def capture_loopback(src, lane, chunk_ms, follow_default=True, say=print):
                 st = p.open(format=pa.paInt16, channels=ch, rate=sr, input=True,
                             input_device_index=lb["index"], frames_per_buffer=n)
                 try:
-                    prev = cur
                     cur_lb, cur_k, cur_n = lb["name"], lb.get("_k", 0), lb.get("_n", 1)
                     cur = devs[lane] = lb["name"].replace(" [Loopback]", "")
                     if first:
                         say(f"{DIM}  Audio source: {lb['name']}  {sr}Hz{RESET}")
                         src._ready.add(lane)
-                    elif why == "switch":
-                        say(f"{CLR_LINE}{GRN}  ✓ Computer audio is now recorded from: {cur}{RESET}\n")
-                    elif cur != prev:
-                        # V1.31（使用者 09-28 拔電視實測後同意改）：原本那顆不見了、跟著 Windows 的預設改錄另一顆——
-                        # 以前也寫「接回來了」，看起來像原本那顆（電視）回來了
-                        say(f"{CLR_LINE}\n{GRN}  ✓ Computer audio is now recorded from: {cur} (the previous device is gone){RESET}\n")
-                    else:
-                        say(f"{CLR_LINE}\n{GRN}  ✓ Computer audio reconnected: {cur}{RESET}\n")
-                    first, told = False, False
-                    poll = time.monotonic() + DEFAULT_POLL
+                        ok_name, ok_id = cur, cur_id   # 審查第 3 輪低-7：畫面已說了聲音來源是這一顆——第一條一讀就壞、接回別顆時才不會說成「接回來了」
+                    # 🔴 V1.39 審查（中-2；第 2、3 輪加寬）：重開的這條要穩定一段時間都沒回錯誤碼，才講接回來了、才算這次斷線結束——
+                    #    以前一開好就講：遇到「開得起來、撐一下就壞」（插頭接觸不良一直跳、音效驅動反覆重啟）會一直刷 ⚠／✓。
+                    #    要穩定多久＝STABLE_AFTER（1 秒）；講了接回來了之後 SHAKY_WINDOW 秒內又斷＝同一場不穩，下一次要穩定 2、4、8 秒才講
+                    #    （審查第 3 輪：撐 1 秒多才壞的會每 2 秒一組）。聲音一開好就照常收，只是「接回來了」晚一點講。
+                    pending, first = not first, False
+                    since = time.monotonic()
+                    poll = since + DEFAULT_POLL
                     while not src.stop.is_set():
-                        if st.get_read_available() >= n:
-                            raw = st.read(n, exception_on_overflow=False)
-                            a = np.frombuffer(raw, dtype=np.int16).reshape(-1, ch).mean(axis=1)
-                            note_level(src, lane, float(np.sqrt(np.mean(np.square(a)))) / 32768.0)
-                            src._push(a, sr, lane)
-                            continue
-                        time.sleep(0.01)
+                        avail = st.get_read_available()
+                        if avail < 0:
+                            # 🔴 V1.39（2026-10-07 使用者實測）：預設播放是筆電喇叭時，拔插同一顆 Realtek 上的 3.5mm 耳麥——喇叭沒被移除、
+                            #    預設也沒換，這條側錄串流卻已經失效。PyAudio 不丟例外，get_read_available() 每次都回 PortAudio 的
+                            #    錯誤碼（負數），以前當成「還沒有資料」一直等：電腦聲音整場收不到、插回也不恢復，畫面還說「電腦現在沒有在播」。
+                            #    微軟文件列的失效原因（格式被改、音訊服務重啟、別的程式獨佔…）都是這樣，所以看串流自己回報的錯誤，不猜原因。
+                            raise RuntimeError(f"The loopback stream stopped working (PortAudio error code {avail})")
                         now = time.monotonic()
-                        if now >= poll:
+                        settled = pending and now - since >= STABLE_AFTER * 2 ** shaky
+                        # 審查第 3 輪低-1：試用期滿、要講接回來了之前，先照輪詢問一次 Windows（那顆還在嗎、預設換了沒）——
+                        # 不然可能對剛被拔掉、串流卻沒回報錯誤的那顆說接回來了（以前靠 STABLE_AFTER 跟 DEFAULT_POLL 剛好相等）
+                        if now >= poll or settled:
                             poll = now + DEFAULT_POLL
                             nxt = default_device_id(0, role=1)
                             # 🔴 開的時候剛好問不到 ID（USB 耳機拔插的那一瞬間、COM 偶爾失敗）＝cur_id 是空的，拔除和換預設都偵測不到
@@ -1504,6 +1510,32 @@ def capture_loopback(src, lane, chunk_ms, follow_default=True, say=print):
                                 raise RuntimeError(f"\"{cur}\" has disappeared")
                             if follow_default and nxt and not _same_key(nxt, cur_id):
                                 raise _Switch(_device_label(nxt))
+                        if settled:
+                            pending, told, quick, ok_at = False, False, 0, now
+                            if not ok_name or cur == ok_name:
+                                # 審查第 3 輪低-2：接回原本那顆（含預設閃到別顆又回來）一律說接回來了
+                                say(f"{CLR_LINE}\n{GRN}  ✓ Computer audio reconnected: {cur}{RESET}\n")
+                            elif why == "switch":
+                                say(f"{CLR_LINE}{GRN}  ✓ Computer audio is now recorded from: {cur}{RESET}\n")
+                            elif ok_id and not _render_present(ok_id):
+                                # V1.31（使用者 09-28 拔電視實測後同意改）：原本那顆不見了、跟著 Windows 的預設改錄另一顆——
+                                # 以前也寫「接回來了」，看起來像原本那顆（電視）回來了
+                                say(f"{CLR_LINE}\n{GRN}  ✓ Computer audio is now recorded from: {cur} (the previous device is gone){RESET}\n")
+                            else:
+                                # 🔴 V1.39 審查（中-1）：插回耳麥時喇叭那條失效、Windows 的預設同時換成耳機——失效先被看到（10 毫秒內），
+                                #    走的是「斷了」這條、不是「預設換了」那條。原本那顆還在，不可以說它不見了（V1.38 這時說預設換了）。
+                                say(f"{CLR_LINE}\n{GRN}  ✓ Computer audio is now recorded from: {cur} (Windows switched its default playback device to this one){RESET}\n")
+                        if not pending:
+                            ok_name, ok_id = cur, cur_id
+                            if shaky and ok_at is not None and now - ok_at >= SHAKY_WINDOW:
+                                shaky = 0      # 審查第 4 輪低-2：穩定超過 SHAKY_WINDOW 就不算不穩了（以前要等下一次斷才歸零）
+                        if avail >= n:
+                            raw = st.read(n, exception_on_overflow=False)
+                            a = np.frombuffer(raw, dtype=np.int16).reshape(-1, ch).mean(axis=1)
+                            note_level(src, lane, float(np.sqrt(np.mean(np.square(a)))) / 32768.0)
+                            src._push(a, sr, lane)
+                            continue
+                        time.sleep(0.01)
                 finally:
                     try:
                         st.stop_stream()
@@ -1520,10 +1552,21 @@ def capture_loopback(src, lane, chunk_ms, follow_default=True, say=print):
                 raise
             if src.stop.is_set():
                 return
+            if pending:
+                # 試用期中就壞：已經在斷線中（講過 ⚠）、而且開好不到 STABLE_AFTER 就壞，才算「連著一讀就壞」、越晚再試；
+                # 預設剛換過去那條一讀就壞照常 1 秒（審查第 3 輪低-3）；撐過 STABLE_AFTER 才壞的（遲滯把試用期拉長時）照常 1 秒——
+                # 遲滯只延後「接回來了」那句，不延後重開（審查第 4 輪中-1：撐 1～8 秒才壞的曾退到每 5 秒才重開）。
+                # 上限 3（再試間隔最多 5 秒、一直試下去）：沒上限的話約 1024 次後 2 ** quick 溢位（審查第 2 輪中-1）
+                quick = min(quick + 1, 3) if told and time.monotonic() - since < STABLE_AFTER else 0
+            elif pending is False:
+                # 穩定過的那條斷了：再試照常 1 秒；講了接回來了之後 SHAKY_WINDOW 秒內又斷＝同一場不穩，下一次要穩定更久才講（審查第 3 輪中-1）
+                quick = 0
+                shaky = min(shaky + 1, 3) if ok_at is not None and time.monotonic() - ok_at < SHAKY_WINDOW else 0
             if not told:
                 told = True
-                say(f"{CLR_LINE}\n{YEL}  ⚠ Computer audio can no longer be captured (was the playback device unplugged or changed?) — reconnecting automatically; you'll be told when it's back.{RESET}\n{DIM}     Online sound during this time won't have captions.{RESET}")
-            src.stop.wait(REOPEN_EVERY)
+                say(f"{CLR_LINE}\n{YEL}  ⚠ Computer audio can no longer be captured (plugging or unplugging a headset, or unplugging or changing the playback device, can cause this) — reconnecting automatically; you'll be told when it's back.{RESET}\n{DIM}     Online sound during this time won't have captions.{RESET}")
+            # V1.39 審查（中-2）：斷線中連著「開得起來、撐不到試用期就壞」就越晚再試（1→2→4→5 秒），不要每秒整套重新初始化聲音元件
+            src.stop.wait(min(REOPEN_EVERY * 2 ** quick, 5.0))
 
 
 # ─────────────────────── 收音狀態（P1 音量表）───────────────────────

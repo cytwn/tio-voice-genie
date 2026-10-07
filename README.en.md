@@ -24,7 +24,7 @@ Website: [introduction](https://tio-voice-genie.vercel.app/en/) · [user guide](
 | # | Feature | In short |
 |---|---|---|
 | 1 | Live meeting captions | See captions while the meeting runs |
-| 2 | Recording to transcript | A recorded file becomes a transcript with speakers and timestamps |
+| 2 | Recording to transcript | An audio or video recording becomes a transcript with speakers and timestamps |
 | 3 | Live bilingual captions | Source and translation on screen at the same time (Chinese, English, Japanese) |
 | 4 | Transcript to bilingual | Translate a whole transcript at once — much better quality than live |
 | 5 | Rebuild a transcript | Redo a transcript from its `.json` or rename speakers, offline and free |

@@ -1,7 +1,7 @@
 # TIO Voice Genie
 
 Uses Google's **Gemini 3.5 Transcribe / Live API** for five jobs: live meeting captions,
-recording → Traditional Chinese transcript, live bilingual captions, transcript → bilingual document, and live voice translation (interpreter mode),
+recording (audio or video) → Traditional Chinese transcript, live bilingual captions, transcript → bilingual document, and live voice translation (interpreter mode),
 plus a purely local transcript rebuild. All of them have been tested end to end on a real PC.
 
 Ordinary users start by double-clicking `4_Start.bat`. They see an English menu and never have to type a command.
@@ -81,7 +81,7 @@ It produces two files:
 > An `.srt` (subtitle track) is **not produced** by default: opened on its own it just brings up an empty player, and most people never need it.
 > If you really do want to put it on a video, just add the `--srt` option.
 
-### 2. Recording → Traditional Chinese transcript (with speakers and timestamps)
+### 2. Recording (audio or video) → Traditional Chinese transcript (with speakers and timestamps)
 
 ```bash
 python scripts/transcribe_meeting.py meeting_recording.m4a \
@@ -251,7 +251,7 @@ scripts/
   rescue.ps1                       Diagnostic script called by 8_Rescue_Undeletable_Folder.bat
   menu.py                          The English menu itself (called by 4_Start.bat)
   live_caption.py                  Live meeting captions
-  transcribe_meeting.py            Recording → Traditional Chinese transcript (with automatic splitting and fault tolerance)
+  transcribe_meeting.py            Recording (audio or video) → Traditional Chinese transcript (with automatic splitting and fault tolerance)
   live_bilingual.py                Live bilingual captions · Fast mode (translates as it listens)
   live_bilingual_hq.py             Live bilingual captions · Accurate mode (waits for whole sentences, normal word order)
   translate_transcript.py          Transcript/subtitles → bilingual document

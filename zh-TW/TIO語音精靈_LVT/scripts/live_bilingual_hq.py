@@ -944,7 +944,16 @@ async def run(a):
                             if src.eof:
                                 await asyncio.sleep(a.settle + 2)
                                 gate.tick()
-                                await mt_q.join()
+                                # V1.40（待辦 24）：等翻譯佇列翻完、或按了 Ctrl+C（stop_all），先到先算。以前只等 join()：翻譯卡住時
+                                #    （每句最多約 40 秒，佇列有幾句就幾倍）按 Ctrl+C 也不會提早收尾。按了就走下面 Ctrl+C 那一套收尾
+                                #    （最多再等 15 秒，等不到的照 late_rows 存原文、譯文標 LATE_MT）。
+                                join_t = asyncio.ensure_future(mt_q.join())
+                                stop_t = asyncio.ensure_future(stop_all.wait())
+                                try:
+                                    await asyncio.wait({join_t, stop_t}, return_when=asyncio.FIRST_COMPLETED)
+                                finally:
+                                    join_t.cancel()
+                                    stop_t.cancel()
                                 stop_all.set()
                             elif rot.due():      # 佇列空了才問：有積壓時先送完（見 _live.RotateWhenQuiet）
                                 break

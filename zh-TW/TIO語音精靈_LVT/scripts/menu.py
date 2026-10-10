@@ -228,6 +228,7 @@ def ask_vocab():
 
 
 CANCEL_RC = 130            # 128 + SIGINT：live 腳本「使用者主動取消、還沒開始錄音」的離開碼約定
+TX_FAILED_RC = 4           # V1.40：功能 4 輸入是影音檔、轉逐字稿那一步沒有產出（失敗或整份沒人講話；原因已經用中文印過；translate_transcript.from_audio，兩邊要一樣）
 _run_interrupted = False   # 上一次 run()：選單這個父行程自己也被 Ctrl+C 打斷了
 _last_rc = None            # 上一次 run() 的離開碼；None＝這一輪沒有跑任何工具
 
@@ -258,15 +259,25 @@ def report_live(rc, stem, cancelled=None):
     base = os.path.basename(stem)
     if has_md:
         # V1.38（X7h）審查第 4 輪：功能 3「準」有幾句沒有譯文（結束時還沒翻好／翻譯失敗）時 .md 檔頭照實講（都含「原文有存」）——這裡不打綠色 ✅。
-        #    標記是 live_bilingual_hq.Out.save 寫進檔頭的字樣；英文版兩邊各翻一次，tools\test_coupling.py 核對兩邊一樣。
+        #    標記是 live_bilingual_hq.Out.save 寫進檔頭的字樣；英文版兩邊各翻一次，tools\test_coupling.py（該檔不隨附）核對兩邊一樣。
         try:
             head = io.open(md, encoding="utf-8", errors="replace").read(3000).split("\n---\n", 1)[0]
         except OSError:
             head = ""
         nomt = "原文有存" in head
-        print(C(f"\n{'⚠' if nomt else '✅'} 檔案在桌面：{base}.md（給人讀）"
-                + (f"／{base}.txt（備份）" if has_txt else ""), YEL if nomt else GRN))
-        if nomt:
+        # V1.40（待辦 25）：整場 0 句時子程式印 ⚠「共 0 段／組／句」，這裡以前照樣打綠色 ✅（只看 .md 在不在）。
+        #    三支即時字幕的 .md 每一句都以「**[分:秒]**」開頭（檔頭只有 # 標題與 - 開頭的說明行）——一行都沒有＝沒有字幕。
+        #    看格式、不看字樣：英文版不用另外翻比對用的字。
+        try:
+            empty = not re.search(r"^\*\*\[\d", io.open(md, encoding="utf-8", errors="replace").read(), re.M)
+        except OSError:
+            empty = False
+        warn = nomt or empty
+        print(C(f"\n{'⚠' if warn else '✅'} 檔案在桌面：{base}.md（給人讀）"
+                + (f"／{base}.txt（備份）" if has_txt else ""), YEL if warn else GRN))
+        if empty:
+            print(C("   檔案裡沒有字幕（整場沒有辨識到任何話，見上面）。", DIM))
+        elif nomt:
             print(C("   有幾句沒有譯文（原文都有存），原因寫在 .md 的檔頭。", DIM))
         if rc not in (0, None):
             print(C("   （程式是非正常結束的，內容可能不完整，請開檔確認）", YEL))
@@ -642,7 +653,8 @@ def do_translate():
                     f"{os.path.basename(interim)}", GRN))
             print(C("   要重試翻譯的話，回選單按 4、這次直接選那個 .json，"
                     "就不用再付一次轉錄的錢。", DIM))
-        if not cancelled:
+        # V1.40 審查（低-4）：轉逐字稿那一步失敗（TX_FAILED_RC）時原因上面已經用中文講了，不叫人找紅字、跑診斷（診斷查不出這個）
+        if not cancelled and rc != TX_FAILED_RC:
             print(C("   請往上捲看紅色的錯誤訊息；看不懂就點兩下 6_診斷.bat 截圖回報。", DIM))
         pause(); return
     # 🔴 2026-09-20 複查（major）：逐字稿本身缺了一段時，翻完的四個檔照樣打綠勾 ——
@@ -657,7 +669,7 @@ def do_translate():
         print(C(f"\n⚠ 桌面上這幾個檔（都以 {made} 開頭；有些段落沒翻到，內文標成「（這段沒翻到）」；原來的逐字稿也不完整。兩件事檔頭都有寫）：", YEL))
     elif gap_tr:
         # V1.38：只翻成一部分（網路一直沒回來、額度用完、按了 Ctrl+C）時不可以打 ✅（以前照樣打 ✅）。
-        #    標記是 translate_transcript.write_outputs 寫進檔頭的字樣；英文版兩邊各翻一次，tools\test_coupling.py 核對兩邊一樣。
+        #    標記是 translate_transcript.write_outputs 寫進檔頭的字樣；英文版兩邊各翻一次，tools\test_coupling.py（該檔不隨附）核對兩邊一樣。
         print(C(f"\n⚠ 桌面上這幾個檔（都以 {made} 開頭；有些段落沒翻到，內文標成「（這段沒翻到）」，檔頭寫了缺幾段）：", YEL))
     elif gap_src:
         # 🔴 V1.26（C1）：翻譯程式自己已經印過「原來的逐字稿就不完整」、缺口清單和「寄出去之前先看缺口」，

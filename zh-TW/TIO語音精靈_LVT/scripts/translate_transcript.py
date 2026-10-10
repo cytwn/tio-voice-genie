@@ -206,13 +206,24 @@ def from_audio(path, vocab, names, dest_dir=None, interim_out=None):
     if names:
         cmd += ["--names"] + names
     print("▸ 先轉逐字稿…")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        # V1.40（待辦 23）：失敗的原因 transcribe_meeting 已經用中文印在上面了。以前這裡丟 CalledProcessError，畫面多一行英文
+        #    「Command '[…]' returned non-zero exit status 1.」還叫人點 6_診斷.bat（診斷查不出轉逐字稿為什麼失敗）。
+        # V1.40 審查第 2 輪（低-3）：只有 transcribe_meeting 自己處理過的失敗（離開碼 1、2）上面才一定有中文原因；
+        #    其他離開碼（程式當掉、被防毒砍掉）上面不一定有字——照實印離開碼、用 1 結束，選單照舊提示可以點 6_診斷.bat。
+        if e.returncode in (1, 2):
+            print("\n✗ 轉逐字稿那一步沒有完成（原因見上面），所以這次沒有翻譯。")
+            sys.exit(4)      # V1.40 審查（低-4）：選單看到 4 就知道原因已經講過、不再叫人點 6_診斷.bat（menu.TX_FAILED_RC，兩邊要一樣）
+        print(f"\n✗ 轉逐字稿那一步意外結束（離開碼 {e.returncode}），所以這次沒有翻譯。")
+        sys.exit(1)
     js = os.path.splitext(out)[0] + ".json"
     if not os.path.exists(js):
         # 🔴 整份沒人講話時 transcribe_meeting 正常結束（離開碼 0）、但不產出逐字稿（2026-09-20 N3）。
         #    直接去讀會丟英文 FileNotFoundError 還叫人跑診斷（複查指出）。原因上面已經印了，這裡照實講。
         print("✗ 這份錄音沒有辨識到有人講話，沒有東西可以翻譯。")
-        sys.exit(1)
+        sys.exit(4)      # V1.40 審查第 2 輪（低-4）：原因已經講了，選單不再叫人點 6_診斷.bat（同上，menu.TX_FAILED_RC）
     return load_json(js), out
 
 
@@ -373,9 +384,15 @@ def translate(client, segs, src_lang, tgt_lang, glossary, extra_note):
                 dead = KeyboardInterrupt()
                 break
             except Exception as e:
-                if _net_down(e):
+                if _permanent(e) or _net_down(e):
                     # V1.38 審查（#9）：_retry 已經等滿 NET_WAIT_MAX 網路還沒回來——剩下的一段一段撞只是空轉，不補了
-                    print(f"  ✗ 網路一直沒有回來（等了 {NET_WAIT_MAX // 60} 分鐘），剩下的不補了。")
+                    # V1.40（待辦 22）：額度用完、金鑰失效、花費上限這種「重試也不會好」的也一樣不補了（以前每段各撞一次：1400 段＝1400 次呼叫）。
+                    #    記成 dead（同上面批次那邊）：一段都沒翻好時，收尾用 _explain 講中文原因。
+                    dead = e
+                    if _net_down(e):
+                        print(f"  ✗ 網路一直沒有回來（等了 {NET_WAIT_MAX // 60} 分鐘），剩下的不補了。")
+                    else:
+                        print("  ✗ 這個錯誤重試也不會好，剩下的不補了。")
                     break
     still = [j for j in range(len(segs)) if j not in out]
     if still:
@@ -615,6 +632,14 @@ def main():
             print(f"   {f}")
         return 1
     if ok_n < len(trans):
+        if dead is not None and (isinstance(dead, gerr.APIError) or _net_down(dead) or "CERTIFICATE_VERIFY_FAILED" in str(dead)):
+            # V1.40 審查（低-2）：中途停下（額度用完、花費上限、金鑰錯、網路一直沒回來）時照實講是什麼錯——以前只說「重試也不會好」
+            #    沒說是什麼錯，使用者分不出是額度還是花費上限，可能馬上整份重跑、再付一次翻譯費。（Ctrl+C 的在上面就 return 了）
+            # 第 2 輪：只講 Google 真的回了錯誤代碼、或網路斷了的——其他例外（SSL 閃斷、JSON 解析錯誤）_live.diagnose 只看字串，
+            #    會講成「憑證被攔截」「金鑰有問題」這種錯的原因（前面幾批剛在同一個網路上翻成功）；第 3 輪：憑證真的驗證失敗
+            #    （CERTIFICATE_VERIFY_FAILED，例如中途換到會檢查 HTTPS 的校園網路）照樣講。原因放在「部分完成」之前，
+            #    下面的檔案清單才不會看起來像原因說明的一部分。
+            _explain(dead)
         print(f"\n⚠ 部分完成：{len(trans)} 段裡有 {len(trans) - ok_n} 段沒翻到，"
               f"檔案裡都標出來了。")
     else:
@@ -679,7 +704,7 @@ if __name__ == "__main__":
         _code = 1
     except SystemExit as e:
         # 🔴 不要寫成 `e.code or 1`：那會把 sys.exit(0)（成功）也變成 1。
-        #    目前程式裡的 sys.exit 都不是 0（1，或沒有金鑰時的 2），所以還沒出事，但這是留給未來的陷阱。
+        #    目前程式裡的 sys.exit 都不是 0（1、沒有金鑰時的 2、V1.40 起轉逐字稿沒有產出時的 4），所以還沒出事，但這是留給未來的陷阱。
         _code = 1 if e.code is None else e.code
     except Exception as _e:
         _code = _explain(_e)

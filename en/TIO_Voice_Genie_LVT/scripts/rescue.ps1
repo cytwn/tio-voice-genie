@@ -220,17 +220,35 @@ Write-Host '  b. Trying to rename it into the holding area…'
 # 🔴 暫存區必須跟目標同一個磁碟，不能用 %TEMP%。
 #    跨磁碟的 Move-Item 是「逐檔複製再刪除」，中途卡住會變成
 #    「一半的檔已經被搬走，卻回報失敗」，比不動更糟。
-#    同磁碟的 Move-Item 是單純改名：要嘛整個成功、要嘛完全不動。
 #    （2026-09-10：uninstall_gui.py 先修好，這支漏了，是同一個病。）
+#    🔴 2026-10-10 更正：同磁碟的 Move-Item **也不是**單純改名。裡面有東西被別的
+#    程式開著（檔案被開著，不管有沒有帶 FILE_SHARE_DELETE；或某個行程的工作目錄
+#    停在裡面的子資料夾）時整個改名會失敗，Windows PowerShell 5.1 的 Move-Item
+#    接著改成一個一個檔搬，搬到搬不動的那一個才丟例外 → 一樣拆成兩半（實測：鎖 1 個
+#    檔，12～28 個檔跑進 _gs_delete_…；工作目錄停在 scripts\ 時 32 個檔全跑掉），
+#    下面卻印「沒有刪除任何檔案」。所以改用 [IO.Directory]::Move：只做真正的改名，
+#    要嘛整個成功、要嘛完全不動；跨磁碟時直接丟例外，不會退回逐檔複製。
+#    取捨：檔案被「允許刪除」的方式開著時（防毒、索引、雲端同步常這樣開），舊寫法
+#    逐檔搬會碰巧整個成功；新寫法先每秒再試、最多試 5 次（見下面），還是被佔用就整個
+#    不動——寧可不動，也不要拆成兩半。
 $staged = Join-Path (Split-Path -Parent $target) ("_gs_delete_" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $moved = $false
 try {
-    Move-Item -LiteralPath $target -Destination $staged -ErrorAction Stop
+    # 🔴 2026-10-10（使用者裁決）：改名失敗先隔 1 秒再試，最多試 5 次（約多等 4 秒）——防毒、索引、
+    #    雲端同步、剛關掉的檔案總管常常只佔用幾秒。改名是全有全無，重試不會拆成兩半；5 次都不行才
+    #    把例外往外丟，走下面的 catch。
+    for ($attempt = 1; ; $attempt++) {
+        try { [IO.Directory]::Move($target, $staged); break }
+        catch { if ($attempt -ge 5) { throw $_ }; Start-Sleep -Milliseconds 1000 }
+    }
     $moved = $true
     Write-Host '     ✅ Renamed — the folder is no longer under its original name (it is temporarily called _gs_delete_…, and its contents are deleted one by one next)' -ForegroundColor Green
     Write-Host '        (so it is not a permissions problem; something is just holding the contents)'
 } catch {
-    Write-Host "     ✗ Could not move it: $($_.Exception.Message)" -ForegroundColor Red
+    # 🔴 2026-10-10：這裡不印 $_.Exception.Message。改用 [IO.Directory]::Move 之後它是
+    #    「以 "2" 引數呼叫 "Move" 時發生例外狀況: "拒絕存取路徑 '…'。"」——技術雜訊，「拒絕存取」
+    #    又會把人帶去以為是權限問題（這支工具最想避免的歧路）。使用者裁決：只留白話。
+    Write-Host '     ✗ Could not move it: Windows would not let this folder be renamed.' -ForegroundColor Red
     Write-Host '        This means a program is still holding this folder (not a permissions problem).' -ForegroundColor Yellow
     Write-Host ''
     # 🔴 這裡絕對不能往下走去逐檔刪除。

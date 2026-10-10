@@ -710,10 +710,12 @@ class Uninstaller(tk.Tk):
         #    完全沒有線索。改成五步：
         #      1. 等本程式的行程真的結束（不是盲目睡 2 秒就動手）
         #      2. 清掉唯讀屬性
-        #      3. 先試著改名搬到 %TEMP%（沒有東西鎖住時，這樣桌面立刻乾淨）
-        #         ⚠ 實測修正：Windows **不允許**改名一個「裡面有檔案被開著」的
-        #           資料夾（開檔沒帶 FILE_SHARE_DELETE 時），所以這一步不是萬靈丹，
-        #           只是能救到「目錄本身沒被鎖、只是內容多」的情況。
+        #      3. 先試著改名搬到同一層的暫存資料夾 _gs_removed_<編號>（沒有東西鎖住時，
+        #         這樣桌面立刻乾淨；09-10 起不用 %TEMP%，原因見下面）
+        #         ⚠ 實測修正：Windows **不允許**改名一個「裡面有東西被開著」的資料夾
+        #           （檔案被開著——10-10 實測帶不帶 FILE_SHARE_DELETE 都一樣——或某個
+        #           行程的工作目錄停在裡面），所以這一步不是萬靈丹，只是能救到
+        #           「目錄本身沒被鎖、只是內容多」的情況。
         #      4. 由深到淺逐個刪，單一個鎖住的檔案不會讓整批放棄
         #      5. 真的失敗就**跳一個中文對話框**告訴使用者怎麼辦
         #         （早期版本只寫紀錄到 %TEMP%，等於沒講——沒人會去看那裡）
@@ -723,7 +725,17 @@ class Uninstaller(tk.Tk):
         #    中途卡住會變成「一半的檔已經被搬走、$moved 卻是 False」，
         #    於是程式跳過刪除、對話框對使用者說「一個都沒有刪」——那是假的，
         #    而且被搬走的正好包含解除安裝程式和救援工具。
-        #    同磁碟的 Move-Item 是單純改名：要嘛整個成功、要嘛完全不動。
+        #    🔴 2026-10-10 更正：同磁碟的 Move-Item **也不是**單純改名。裡面有東西被
+        #    別的程式開著（檔案被開著，不管有沒有帶 FILE_SHARE_DELETE；或某個行程的
+        #    工作目錄停在裡面的子資料夾）時整個改名會失敗，Windows PowerShell 5.1 的
+        #    Move-Item 接著改成一個一個檔搬，搬到搬不動的那一個才丟例外 → 同一個病
+        #    （實測：鎖 1 個檔，12～28 個檔跑進 _gs_removed_<pid>，含 7_、8_ 兩支 .bat；
+        #    工作目錄停在 scripts\ 時 32 個檔全跑掉；對話框都說一個都沒有刪）。
+        #    所以改用 [IO.Directory]::Move：只做真正的改名，要嘛整個成功、要嘛完全
+        #    不動；跨磁碟時直接丟例外，不會退回逐檔複製。
+        #    取捨：檔案被「允許刪除」的方式開著時（防毒、索引、雲端同步常這樣開），舊寫法
+        #    逐檔搬會碰巧整個成功；新寫法先每秒再試、最多試 5 次（見下面），還是被佔用就整個
+        #    不動、跳對話框——寧可不動，也不要拆成兩半。
         stage = os.path.join(os.path.dirname(os.path.abspath(ROOT)),
                              "_gs_removed_%d" % pid)
         note = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")),
@@ -753,8 +765,11 @@ class Uninstaller(tk.Tk):
             " if ($_.Attributes -band [IO.FileAttributes]::ReadOnly) {"
             " $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly } }; "
             "$moved=$false; "
-            "try { Move-Item -LiteralPath $t -Destination $s -ErrorAction Stop; "
-            "$moved=$true } catch {}; "
+            # 🔴 2026-10-10（使用者裁決）：改名失敗先隔 1 秒再試，最多試 5 次（約多等 4 秒）——
+            #    防毒、索引、雲端同步、剛關掉的檔案總管常常只佔用幾秒。改名是全有全無，重試不會拆成兩半。
+            "for ($k=1; $k -le 5 -and -not $moved; $k++) {"
+            " try { [IO.Directory]::Move($t, $s); $moved=$true }"
+            " catch { if ($k -lt 5) { Start-Sleep -Milliseconds 1000 } } }; "
             # 🔴 改名失敗就停手，絕對不能往下逐檔刪除。
             #    舊版失敗後照樣把資料夾裡的東西刪光（含 1~8 全部手冊、
             #    解除安裝程式、救援工具），結果是「資料夾還在，但東西全沒了」，
